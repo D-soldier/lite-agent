@@ -5,6 +5,7 @@ import {
   DEFAULT_MODEL,
   extractDelta,
   isExitCommand,
+  isDirectRun,
   readConfig,
   sendMessage,
 } from "../src/index";
@@ -105,5 +106,17 @@ describe("sendMessage", () => {
         stream: true,
       },
     ]);
+  });
+});
+
+describe("isDirectRun", () => {
+  it("detects when the current module is the process entry", () => {
+    expect(isDirectRun("file:///tmp/app/src/index.ts", "/tmp/app/src/index.ts")).toBe(
+      true,
+    );
+  });
+
+  it("returns false when argv path is missing", () => {
+    expect(isDirectRun("file:///tmp/app/src/index.ts", undefined)).toBe(false);
   });
 });

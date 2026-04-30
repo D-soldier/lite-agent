@@ -1,4 +1,7 @@
 import OpenAI from "openai";
+import { stdin, stdout } from "node:process";
+import { createInterface } from "node:readline/promises";
+import { pathToFileURL } from "node:url";
 import type {
   ChatCompletionChunk,
   ChatCompletionMessageParam,
@@ -56,12 +59,20 @@ export function extractDelta(chunk: {
   return chunk.choices?.[0]?.delta?.content ?? "";
 }
 
+export function formatError(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  return String(error);
+}
+
 export async function sendMessage({
   client,
   model,
   messages,
   write = (text) => {
-    process.stdout.write(text);
+    stdout.write(text);
   },
 }: SendMessageOptions): Promise<string> {
   const stream = await client.chat.completions.create({
@@ -81,6 +92,87 @@ export async function sendMessage({
   }
 
   return response;
+}
+
+export async function runChatLoop(client: OpenAI, model: string): Promise<void> {
+  const rl = createInterface({ input: stdin, output: stdout });
+  const messages: ChatCompletionMessageParam[] = [];
+  let interrupted = false;
+  const onSigint = () => {
+    interrupted = true;
+    stdout.write("\n");
+    rl.close();
+  };
+
+  process.once("SIGINT", onSigint);
+
+  try {
+    while (!interrupted) {
+      let rawInput: string;
+
+      try {
+        rawInput = await rl.question("you> ");
+      } catch (error) {
+        if (interrupted) {
+          break;
+        }
+
+        throw error;
+      }
+
+      const userInput = rawInput.trim();
+
+      if (userInput.length === 0) {
+        continue;
+      }
+
+      if (isExitCommand(userInput)) {
+        break;
+      }
+
+      messages.push({ role: "user", content: userInput });
+
+      try {
+        const response = await sendMessage({ client, model, messages });
+        stdout.write("\n");
+        messages.push({ role: "assistant", content: response });
+      } catch (error) {
+        stdout.write(`\n请求失败：${formatError(error)}\n`);
+      }
+    }
+  } finally {
+    process.removeListener("SIGINT", onSigint);
+    rl.close();
+  }
+}
+
+export function isDirectRun(metaUrl: string, argvPath?: string): boolean {
+  if (!argvPath) {
+    return false;
+  }
+
+  const candidates = [pathToFileURL(argvPath).href];
+
+  if (argvPath.startsWith("/")) {
+    candidates.push(`file://${argvPath}`);
+  }
+
+  return candidates.includes(metaUrl);
+}
+
+export async function main(): Promise<void> {
+  try {
+    const config = readConfig();
+    const client = createClient(config);
+    await runChatLoop(client, config.model);
+  } catch (error) {
+    console.error(`错误：${formatError(error)}`);
+    process.exitCode = 1;
+  }
+}
+
+if (isDirectRun(import.meta.url, process.argv[1])) {
+  void main();
 }
 
 export type { ChatCompletionMessageParam };
