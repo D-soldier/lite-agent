@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
+import type OpenAI from "openai";
 import {
   DEFAULT_BASE_URL,
   DEFAULT_MODEL,
   extractDelta,
   isExitCommand,
   readConfig,
+  sendMessage,
 } from "../src/index";
 
 describe("readConfig", () => {
@@ -61,5 +63,47 @@ describe("extractDelta", () => {
     };
 
     expect(extractDelta(chunk)).toBe("");
+  });
+});
+
+describe("sendMessage", () => {
+  it("sends chat history with streaming enabled and writes streamed deltas", async () => {
+    const calls: unknown[] = [];
+    const fakeStream = (async function* () {
+      yield { choices: [{ delta: { content: "你" } }] };
+      yield { choices: [{ delta: { content: "好" } }] };
+      yield { choices: [{ delta: {} }] };
+    })();
+    const client = {
+      chat: {
+        completions: {
+          create: async (params: unknown) => {
+            calls.push(params);
+            return fakeStream;
+          },
+        },
+      },
+    } as unknown as OpenAI;
+    const writes: string[] = [];
+    const messages = [{ role: "user" as const, content: "你好" }];
+
+    const response = await sendMessage({
+      client,
+      model: "deepseek-v4-flash",
+      messages,
+      write: (text) => {
+        writes.push(text);
+      },
+    });
+
+    expect(response).toBe("你好");
+    expect(writes.join("")).toBe("你好");
+    expect(calls).toEqual([
+      {
+        model: "deepseek-v4-flash",
+        messages,
+        stream: true,
+      },
+    ]);
   });
 });
