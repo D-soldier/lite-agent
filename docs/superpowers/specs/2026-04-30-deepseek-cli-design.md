@@ -1,68 +1,59 @@
-# DeepSeek LLM Chat CLI Design
+# DeepSeek LLM 对话 CLI 设计
 
-## Context
+## 背景
 
-The current project is a minimal Node.js package with only `package.json`.
-The goal is to add a TypeScript command-line chat program that talks to
-DeepSeek through the OpenAI SDK and DeepSeek's OpenAI-compatible API.
+当前项目是一个最小 Node.js 包，只有 `package.json`。目标是在这个项目中添加一个 TypeScript 命令行对话程序，通过 OpenAI SDK 调用 DeepSeek 的 OpenAI-compatible API。
 
-DeepSeek's current API documentation lists `https://api.deepseek.com` as the
-OpenAI-compatible base URL and `deepseek-v4-flash` as a supported model.
+DeepSeek 当前 API 文档列出 `https://api.deepseek.com` 作为 OpenAI-compatible base URL，并列出 `deepseek-v4-flash` 作为可用模型。
 
-## Goals
+## 目标
 
-- Provide an interactive CLI chat loop for LLM conversation.
-- Use the official `openai` npm package.
-- Configure the OpenAI SDK client for DeepSeek.
-- Read the API key from `DEEPSEEK_API_KEY`.
-- Default to `deepseek-v4-flash`.
-- Stream assistant output as it is generated.
-- Keep conversation history in memory for the current process only.
+- 提供交互式 CLI 对话循环。
+- 使用官方 `openai` npm 包。
+- 将 OpenAI SDK client 配置为调用 DeepSeek。
+- 从 `DEEPSEEK_API_KEY` 读取 API key。
+- 默认模型使用 `deepseek-v4-flash`。
+- 以流式方式输出 assistant 回复。
+- 只在当前进程内保留对话历史。
 
-## Non-Goals
+## 非目标
 
-- No persistent chat history.
-- No npm package publishing setup.
-- No tool calling, file context injection, or agent framework.
-- No GUI or web interface.
+- 不持久化保存聊天历史。
+- 不做 npm 包发布配置。
+- 不加入 tool calling、文件上下文注入或 agent 框架。
+- 不提供 GUI 或 Web 界面。
 
-## User Experience
+## 用户体验
 
-The user starts the CLI with:
+用户通过以下命令启动 CLI：
 
 ```bash
 pnpm chat
 ```
 
-At startup, the program checks for `DEEPSEEK_API_KEY`. If the variable is
-missing, it prints a clear setup message and exits with a non-zero status.
+启动时，程序检查 `DEEPSEEK_API_KEY`。如果环境变量不存在，程序打印清晰的配置提示，并以非零状态码退出。
 
-When configured, the CLI enters a prompt loop:
+配置正确时，CLI 进入提示循环：
 
 ```text
 you>
 ```
 
-The user types a message and presses Enter. The assistant response streams to
-stdout as tokens arrive. After each response, the CLI prints a newline and
-shows the next prompt. Empty input is ignored. The commands `exit` and `quit`
-end the session. `Ctrl+C` also exits cleanly.
+用户输入消息并按 Enter 后，assistant 回复会随着 token 到达持续输出到 stdout。每次回复结束后，CLI 打印换行并显示下一次输入提示。空输入会被忽略。输入 `exit` 或 `quit` 结束会话。按 `Ctrl+C` 也会干净退出。
 
-## Configuration
+## 配置
 
-Environment variables:
+环境变量：
 
-- `DEEPSEEK_API_KEY`: required API key.
-- `DEEPSEEK_MODEL`: optional model override, default `deepseek-v4-flash`.
-- `DEEPSEEK_BASE_URL`: optional base URL override, default
-  `https://api.deepseek.com`.
+- `DEEPSEEK_API_KEY`：必填 API key。
+- `DEEPSEEK_MODEL`：可选模型覆盖值，默认 `deepseek-v4-flash`。
+- `DEEPSEEK_BASE_URL`：可选 base URL 覆盖值，默认 `https://api.deepseek.com`。
 
-`DEEPSEEK_MODEL` and `DEEPSEEK_BASE_URL` are optional to keep the default path
-simple while allowing easy testing against compatible endpoints.
+`DEEPSEEK_MODEL` 和 `DEEPSEEK_BASE_URL` 是可选项。这样默认使用路径足够简单，同时保留对兼容端点做测试或切换模型的能力。
 
-## Technical Design
+## 技术设计
 
-Use TypeScript with a small file layout:
+使用 TypeScript，并保持文件结构很小：
 
 ```text
 package.json
@@ -71,13 +62,13 @@ src/
   index.ts
 ```
 
-Dependencies:
+依赖：
 
-- `openai` for API access.
-- `tsx` for running TypeScript directly during development.
-- `typescript` for type checking.
+- `openai`：访问 API。
+- `tsx`：开发阶段直接运行 TypeScript。
+- `typescript`：做类型检查。
 
-Package scripts:
+`package.json` 脚本：
 
 ```json
 {
@@ -86,57 +77,55 @@ Package scripts:
 }
 ```
 
-`src/index.ts` will contain the CLI, with clear internal function boundaries:
+`src/index.ts` 包含 CLI 核心逻辑，并保持清晰的内部函数边界：
 
-- `createClient()`: validates environment and returns an OpenAI SDK client.
-- `runChatLoop()`: owns readline setup, prompts, and exit handling.
-- `sendMessage()`: sends the current message history with streaming enabled.
-- `extractDelta()`: extracts streamed assistant text from each chunk.
+- `createClient()`：校验环境变量并返回 OpenAI SDK client。
+- `runChatLoop()`：负责 readline 设置、提示符和退出处理。
+- `sendMessage()`：携带当前消息历史发起流式请求。
+- `extractDelta()`：从每个 stream chunk 中提取 assistant 增量文本。
 
-This keeps the first implementation compact while leaving natural seams for
-future module extraction.
+第一版实现保持紧凑，同时为后续拆分模块留下自然扩展点。
 
-## Data Flow
+## 数据流
 
-1. Start process with `pnpm chat`.
-2. Read environment variables.
-3. Create `OpenAI` client with `apiKey` and `baseURL`.
-4. Initialize an in-memory `messages` array.
-5. For each non-empty user input:
-   - Append `{ role: "user", content: input }`.
-   - Call `client.chat.completions.create()` with `stream: true`.
-   - Print each streamed text delta to stdout.
-   - Accumulate the full assistant response.
-   - Append `{ role: "assistant", content: response }` after completion.
+1. 用户执行 `pnpm chat` 启动进程。
+2. 程序读取环境变量。
+3. 使用 `apiKey` 和 `baseURL` 创建 `OpenAI` client。
+4. 初始化内存中的 `messages` 数组。
+5. 对每条非空用户输入：
+   - 追加 `{ role: "user", content: input }`。
+   - 调用 `client.chat.completions.create()`，并设置 `stream: true`。
+   - 将每个流式文本增量输出到 stdout。
+   - 累积完整 assistant 回复。
+   - 请求完成后追加 `{ role: "assistant", content: response }`。
 
-If a streaming call fails before completion, the partial assistant response is
-not appended to history.
+如果流式调用在完成前失败，不把不完整的 assistant 回复加入历史。
 
-## Error Handling
+## 错误处理
 
-- Missing `DEEPSEEK_API_KEY`: print a direct setup message and exit.
-- API request failure: print a concise error and continue the prompt loop.
-- Empty input: ignore and prompt again.
-- `exit`, `quit`, or `Ctrl+C`: close readline and terminate cleanly.
+- 缺少 `DEEPSEEK_API_KEY`：打印直接的设置提示并退出。
+- API 请求失败：打印简洁错误，然后继续提示循环。
+- 空输入：忽略并重新提示。
+- `exit`、`quit` 或 `Ctrl+C`：关闭 readline 并干净退出。
 
-## Verification
+## 验证
 
-Run these checks after implementation:
+实现后运行：
 
 ```bash
 pnpm install
 pnpm typecheck
 ```
 
-Manual checks:
+手动检查：
 
-- Without `DEEPSEEK_API_KEY`, `pnpm chat` prints the missing-key error.
-- With `DEEPSEEK_API_KEY`, `pnpm chat` starts an interactive session.
-- A simple prompt returns a streamed response.
-- A second prompt includes prior conversation context.
-- `exit`, `quit`, and `Ctrl+C` terminate cleanly.
+- 未设置 `DEEPSEEK_API_KEY` 时，`pnpm chat` 打印缺少 key 的错误。
+- 设置 `DEEPSEEK_API_KEY` 后，`pnpm chat` 启动交互式会话。
+- 简单 prompt 能返回流式回复。
+- 第二个 prompt 能带上前文对话上下文。
+- `exit`、`quit` 和 `Ctrl+C` 都能干净退出。
 
-## References
+## 参考
 
 - DeepSeek API Docs: https://api-docs.deepseek.com/
 - DeepSeek Models and Pricing: https://api-docs.deepseek.com/quick_start/pricing
