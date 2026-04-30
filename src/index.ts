@@ -1,4 +1,5 @@
 import OpenAI from "openai";
+import { config as loadDotenv } from "dotenv";
 import { stdin, stdout } from "node:process";
 import { createInterface } from "node:readline/promises";
 import { pathToFileURL } from "node:url";
@@ -24,6 +25,23 @@ export type SendMessageOptions = {
   messages: ChatCompletionMessageParam[];
   write?: (text: string) => void;
 };
+
+export function loadEnvFile(
+  envFilePath = ".env",
+  env: NodeJS.ProcessEnv = process.env,
+): void {
+  const result = loadDotenv({
+    path: envFilePath,
+    processEnv: env,
+    override: false,
+    quiet: true,
+  });
+  const error = result.error as NodeJS.ErrnoException | undefined;
+
+  if (error && error.code !== "ENOENT") {
+    throw error;
+  }
+}
 
 export function readConfig(env: Env = process.env): AppConfig {
   const apiKey = env.DEEPSEEK_API_KEY?.trim();
@@ -162,6 +180,7 @@ export function isDirectRun(metaUrl: string, argvPath?: string): boolean {
 
 export async function main(): Promise<void> {
   try {
+    loadEnvFile();
     const config = readConfig();
     const client = createClient(config);
     await runChatLoop(client, config.model);

@@ -1,14 +1,55 @@
 import { describe, expect, it } from "vitest";
 import type OpenAI from "openai";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   DEFAULT_BASE_URL,
   DEFAULT_MODEL,
   extractDelta,
   isExitCommand,
   isDirectRun,
+  loadEnvFile,
   readConfig,
   sendMessage,
 } from "../src/index";
+
+describe("loadEnvFile", () => {
+  it("loads .env values without overriding existing environment values", () => {
+    const dir = mkdtempSync(join(tmpdir(), "lite-agent-env-"));
+
+    try {
+      const envFilePath = join(dir, ".env");
+      const env = { DEEPSEEK_API_KEY: "existing-key" };
+      writeFileSync(
+        envFilePath,
+        [
+          "DEEPSEEK_API_KEY=file-key",
+          "DEEPSEEK_MODEL=file-model",
+          "DEEPSEEK_BASE_URL=https://file.example",
+          "",
+        ].join("\n"),
+      );
+
+      loadEnvFile(envFilePath, env);
+
+      expect(env).toEqual({
+        DEEPSEEK_API_KEY: "existing-key",
+        DEEPSEEK_MODEL: "file-model",
+        DEEPSEEK_BASE_URL: "https://file.example",
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("ignores a missing .env file", () => {
+    const env = {};
+
+    expect(() => loadEnvFile("missing.env", env)).not.toThrow();
+    expect(env).toEqual({});
+  });
+});
 
 describe("readConfig", () => {
   it("throws when DEEPSEEK_API_KEY is missing", () => {
