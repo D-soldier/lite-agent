@@ -1,5 +1,11 @@
-import { appendFile, mkdir, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, relative, resolve } from "node:path";
+import {
+  appendFile,
+  lstat,
+  mkdir,
+  realpath,
+  writeFile,
+} from "node:fs/promises";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
 
 export const WRITE_FILE_TOOL: ChatCompletionTool = {
@@ -100,6 +106,84 @@ export function resolveWritePath(
   throw new Error(`Target path is outside the write root: ${root}`);
 }
 
+function isPathInside(root: string, target: string): boolean {
+  const relativePath = relative(root, target);
+
+  return (
+    relativePath === "" ||
+    (relativePath !== ".." &&
+      !relativePath.startsWith("../") &&
+      !relativePath.startsWith("..\\") &&
+      !isAbsolute(relativePath))
+  );
+}
+
+async function rejectLinkedExistingAncestors(
+  root: string,
+  targetDirectory: string,
+): Promise<void> {
+  const relativeDirectory = relative(root, targetDirectory);
+  if (relativeDirectory === "") {
+    return;
+  }
+
+  let current = root;
+  for (const segment of relativeDirectory.split(sep)) {
+    current = resolve(current, segment);
+
+    try {
+      const stats = await lstat(current);
+      if (stats.isSymbolicLink()) {
+        throw new Error(`Target path includes a linked directory: ${current}`);
+      }
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        "code" in error &&
+        error.code === "ENOENT"
+      ) {
+        return;
+      }
+      throw error;
+    }
+  }
+}
+
+async function ensureSafeWriteTarget(
+  writeRoot: string,
+  targetPath: string,
+): Promise<void> {
+  const root = resolve(writeRoot);
+  const targetDirectory = dirname(targetPath);
+
+  await mkdir(root, { recursive: true });
+  const realRoot = await realpath(root);
+
+  await rejectLinkedExistingAncestors(root, targetDirectory);
+  await mkdir(targetDirectory, { recursive: true });
+
+  const realTargetDirectory = await realpath(targetDirectory);
+  if (!isPathInside(realRoot, realTargetDirectory)) {
+    throw new Error(`Target path resolves outside the write root: ${realRoot}`);
+  }
+
+  try {
+    const targetStats = await lstat(targetPath);
+    if (targetStats.isSymbolicLink()) {
+      throw new Error(`Target file is a symbolic link: ${targetPath}`);
+    }
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      "code" in error &&
+      error.code === "ENOENT"
+    ) {
+      return;
+    }
+    throw error;
+  }
+}
+
 export async function writeFileTool(
   writeRoot: string,
   rawArgs: unknown,
@@ -107,7 +191,7 @@ export async function writeFileTool(
   try {
     const args = parseWriteFileArgs(rawArgs);
     const targetPath = resolveWritePath(writeRoot, args.path);
-    await mkdir(dirname(targetPath), { recursive: true });
+    await ensureSafeWriteTarget(writeRoot, targetPath);
 
     if (args.mode === "append") {
       await appendFile(targetPath, args.content, "utf8");

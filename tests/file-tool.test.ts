@@ -4,10 +4,11 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   WRITE_FILE_TOOL,
@@ -148,15 +149,87 @@ describe("writeFileTool", () => {
     const root = mkdtempSync(join(tmpdir(), "lite-agent-write-"));
 
     try {
+      const outsideName = `${basename(root)}-outside.txt`;
+      const outsidePath = resolve(root, "..", outsideName);
       const result = await writeFileTool(root, {
-        path: "../outside.txt",
+        path: `../${outsideName}`,
         content: "no",
       });
 
       expect(result.ok).toBe(false);
-      expect(existsSync(resolve(root, "..", "outside.txt"))).toBe(false);
+      expect(existsSync(outsidePath)).toBe(false);
     } finally {
       rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not follow a directory symlink or junction outside the write root", async () => {
+    const root = mkdtempSync(join(tmpdir(), "lite-agent-write-"));
+    const outside = mkdtempSync(join(tmpdir(), "lite-agent-outside-"));
+
+    try {
+      const linkPath = join(root, "link");
+      try {
+        symlinkSync(
+          outside,
+          linkPath,
+          process.platform === "win32" ? "junction" : "dir",
+        );
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          "code" in error &&
+          (error.code === "EPERM" || error.code === "EACCES")
+        ) {
+          return;
+        }
+        throw error;
+      }
+
+      const result = await writeFileTool(root, {
+        path: "link/outside.txt",
+        content: "no",
+      });
+
+      expect(result.ok).toBe(false);
+      expect(existsSync(join(outside, "outside.txt"))).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("does not overwrite an existing symlink file", async () => {
+    const root = mkdtempSync(join(tmpdir(), "lite-agent-write-"));
+    const outside = mkdtempSync(join(tmpdir(), "lite-agent-outside-"));
+
+    try {
+      const outsideTarget = join(outside, "target.txt");
+      writeFileSync(outsideTarget, "outside");
+
+      try {
+        symlinkSync(outsideTarget, join(root, "target.txt"), "file");
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          "code" in error &&
+          (error.code === "EPERM" || error.code === "EACCES")
+        ) {
+          return;
+        }
+        throw error;
+      }
+
+      const result = await writeFileTool(root, {
+        path: "target.txt",
+        content: "inside",
+      });
+
+      expect(result.ok).toBe(false);
+      expect(readFileSync(outsideTarget, "utf8")).toBe("outside");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
     }
   });
 });
