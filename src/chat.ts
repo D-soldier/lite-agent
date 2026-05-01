@@ -217,6 +217,17 @@ export async function handleUserMessage({
     const message = await requestToolOrText({ client, model, messages });
 
     if (!message.tool_calls || message.tool_calls.length === 0) {
+      if (toolRounds > 0) {
+        const response = await sendPlainMessage({
+          client,
+          model,
+          messages,
+          write,
+        });
+        messages.push({ role: "assistant", content: response });
+        return;
+      }
+
       const content = message.content ?? "";
 
       if (content.length > 0) {

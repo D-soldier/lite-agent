@@ -163,7 +163,7 @@ describe("handleUserMessage", () => {
     });
   });
 
-  it("confirms write_file, writes a file, sends tool result, and returns final response", async () => {
+  it("confirms write_file, writes a file, sends tool result, and streams final response", async () => {
     const root = mkdtempSync(join(tmpdir(), "lite-agent-chat-"));
 
     try {
@@ -188,7 +188,8 @@ describe("handleUserMessage", () => {
             },
           ],
         }),
-        chatMessage({ role: "assistant", content: "写好了" }),
+        chatMessage({ role: "assistant", content: "准备最终回复" }),
+        streamText("写好了"),
       ]);
 
       await handleUserMessage({
@@ -216,7 +217,7 @@ describe("handleUserMessage", () => {
         "hello",
       );
       expect(writes).toEqual(["写好了"]);
-      expect(client.calls).toHaveLength(2);
+      expect(client.calls).toHaveLength(3);
       expect(client.calls[0]).toMatchObject({
         model: "test-model",
         tools: expect.any(Array),
@@ -225,6 +226,11 @@ describe("handleUserMessage", () => {
         model: "test-model",
         messages,
         tools: expect.any(Array),
+      });
+      expect(client.calls[2]).toMatchObject({
+        model: "test-model",
+        messages,
+        stream: true,
       });
       expect(messages).toContainEqual(
         expect.objectContaining({
@@ -283,7 +289,8 @@ describe("handleUserMessage", () => {
             },
           ],
         }),
-        chatMessage({ role: "assistant", content: "两个文件都写好了" }),
+        chatMessage({ role: "assistant", content: "准备最终回复" }),
+        streamText("两个文件都写好了"),
       ]);
 
       await handleUserMessage({
@@ -301,11 +308,12 @@ describe("handleUserMessage", () => {
       expect(readFileSync(join(root, "notes", "one.txt"), "utf8")).toBe("one");
       expect(readFileSync(join(root, "notes", "two.txt"), "utf8")).toBe("two");
       expect(writes).toEqual(["两个文件都写好了"]);
-      expect(client.calls).toHaveLength(3);
+      expect(client.calls).toHaveLength(4);
       expect(client.calls).toEqual([
         expect.objectContaining({ tools: expect.any(Array) }),
         expect.objectContaining({ tools: expect.any(Array) }),
         expect.objectContaining({ tools: expect.any(Array) }),
+        expect.objectContaining({ stream: true }),
       ]);
       expect(
         messages.filter((message) => message.role === "tool"),
@@ -342,7 +350,8 @@ describe("handleUserMessage", () => {
             },
           ],
         }),
-        chatMessage({ role: "assistant", content: "已取消" }),
+        chatMessage({ role: "assistant", content: "准备最终回复" }),
+        streamText("已取消"),
       ]);
 
       await handleUserMessage({
@@ -356,6 +365,11 @@ describe("handleUserMessage", () => {
       });
 
       expect(existsSync(join(root, "notes", "hello.txt"))).toBe(false);
+      expect(client.calls.at(-1)).toMatchObject({
+        model: "test-model",
+        messages,
+        stream: true,
+      });
       expect(messages).toContainEqual(
         expect.objectContaining({
           role: "tool",
@@ -384,7 +398,8 @@ describe("handleUserMessage", () => {
           },
         ],
       }),
-      chatMessage({ role: "assistant", content: "参数错误" }),
+      chatMessage({ role: "assistant", content: "准备最终回复" }),
+      streamText("参数错误"),
     ]);
 
     await handleUserMessage({
@@ -403,6 +418,11 @@ describe("handleUserMessage", () => {
         content: expect.stringContaining("JSON"),
       }),
     );
+    expect(client.calls.at(-1)).toMatchObject({
+      model: "test-model",
+      messages,
+      stream: true,
+    });
   });
 
   it("returns a tool error for unknown tools", async () => {
@@ -422,7 +442,8 @@ describe("handleUserMessage", () => {
           },
         ],
       }),
-      chatMessage({ role: "assistant", content: "未知工具" }),
+      chatMessage({ role: "assistant", content: "准备最终回复" }),
+      streamText("未知工具"),
     ]);
 
     await handleUserMessage({
@@ -441,6 +462,11 @@ describe("handleUserMessage", () => {
         content: expect.stringContaining("不支持的工具"),
       }),
     );
+    expect(client.calls.at(-1)).toMatchObject({
+      model: "test-model",
+      messages,
+      stream: true,
+    });
   });
 
   it("stops when tool calls exceed the maximum tool rounds", async () => {
