@@ -211,37 +211,48 @@ export async function handleUserMessage({
 }: HandleUserMessageOptions): Promise<void> {
   messages.push({ role: "user", content: userInput });
 
-  const message = await requestToolOrText({ client, model, messages });
+  let toolRounds = 0;
 
-  if (!message.tool_calls || message.tool_calls.length === 0) {
-    const content = message.content ?? "";
+  while (true) {
+    const message = await requestToolOrText({ client, model, messages });
 
-    if (content.length > 0) {
-      write(content);
+    if (!message.tool_calls || message.tool_calls.length === 0) {
+      const content = message.content ?? "";
+
+      if (content.length > 0) {
+        write(content);
+      }
+
+      messages.push({ role: "assistant", content });
+      return;
     }
 
-    messages.push({ role: "assistant", content });
-    return;
+    if (toolRounds >= MAX_TOOL_ROUNDS) {
+      const content = `工具调用超过最大轮数 ${MAX_TOOL_ROUNDS}，已停止继续执行工具。`;
+
+      write(content);
+      messages.push({ role: "assistant", content });
+      return;
+    }
+
+    messages.push(message as ChatCompletionAssistantMessageParam);
+
+    for (const toolCall of message.tool_calls) {
+      const result = await executeToolCall({
+        toolCall,
+        writeRoot,
+        askConfirmation,
+      });
+
+      messages.push({
+        role: "tool",
+        tool_call_id: toolCall.id,
+        content: result,
+      });
+    }
+
+    toolRounds += 1;
   }
-
-  messages.push(message as ChatCompletionAssistantMessageParam);
-
-  for (const toolCall of message.tool_calls) {
-    const result = await executeToolCall({
-      toolCall,
-      writeRoot,
-      askConfirmation,
-    });
-
-    messages.push({
-      role: "tool",
-      tool_call_id: toolCall.id,
-      content: result,
-    });
-  }
-
-  const response = await sendPlainMessage({ client, model, messages, write });
-  messages.push({ role: "assistant", content: response });
 }
 
 export async function runChatLoop({

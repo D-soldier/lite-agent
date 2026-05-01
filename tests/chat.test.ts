@@ -163,7 +163,7 @@ describe("handleUserMessage", () => {
     });
   });
 
-  it("confirms write_file, writes a file, sends tool result, and streams final response", async () => {
+  it("confirms write_file, writes a file, sends tool result, and returns final response", async () => {
     const root = mkdtempSync(join(tmpdir(), "lite-agent-chat-"));
 
     try {
@@ -188,7 +188,7 @@ describe("handleUserMessage", () => {
             },
           ],
         }),
-        streamText("写好了"),
+        chatMessage({ role: "assistant", content: "写好了" }),
       ]);
 
       await handleUserMessage({
@@ -224,7 +224,7 @@ describe("handleUserMessage", () => {
       expect(client.calls[1]).toMatchObject({
         model: "test-model",
         messages,
-        stream: true,
+        tools: expect.any(Array),
       });
       expect(messages).toContainEqual(
         expect.objectContaining({
@@ -236,6 +236,83 @@ describe("handleUserMessage", () => {
       expect(messages.at(-1)).toEqual({
         role: "assistant",
         content: "写好了",
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("handles two consecutive write_file tool rounds before final response", async () => {
+    const root = mkdtempSync(join(tmpdir(), "lite-agent-chat-"));
+
+    try {
+      const messages: ChatCompletionMessageParam[] = [];
+      const writes: string[] = [];
+      const client = createQueuedFakeClient([
+        chatMessage({
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            {
+              id: "call_1",
+              type: "function",
+              function: {
+                name: "write_file",
+                arguments: JSON.stringify({
+                  path: "notes/one.txt",
+                  content: "one",
+                }),
+              },
+            },
+          ],
+        }),
+        chatMessage({
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            {
+              id: "call_2",
+              type: "function",
+              function: {
+                name: "write_file",
+                arguments: JSON.stringify({
+                  path: "notes/two.txt",
+                  content: "two",
+                }),
+              },
+            },
+          ],
+        }),
+        chatMessage({ role: "assistant", content: "两个文件都写好了" }),
+      ]);
+
+      await handleUserMessage({
+        client,
+        model: "test-model",
+        writeRoot: root,
+        messages,
+        userInput: "写两个文件",
+        write: (text) => {
+          writes.push(text);
+        },
+        askConfirmation: async () => true,
+      });
+
+      expect(readFileSync(join(root, "notes", "one.txt"), "utf8")).toBe("one");
+      expect(readFileSync(join(root, "notes", "two.txt"), "utf8")).toBe("two");
+      expect(writes).toEqual(["两个文件都写好了"]);
+      expect(client.calls).toHaveLength(3);
+      expect(client.calls).toEqual([
+        expect.objectContaining({ tools: expect.any(Array) }),
+        expect.objectContaining({ tools: expect.any(Array) }),
+        expect.objectContaining({ tools: expect.any(Array) }),
+      ]);
+      expect(
+        messages.filter((message) => message.role === "tool"),
+      ).toHaveLength(2);
+      expect(messages.at(-1)).toEqual({
+        role: "assistant",
+        content: "两个文件都写好了",
       });
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -265,7 +342,7 @@ describe("handleUserMessage", () => {
             },
           ],
         }),
-        streamText("已取消"),
+        chatMessage({ role: "assistant", content: "已取消" }),
       ]);
 
       await handleUserMessage({
@@ -307,7 +384,7 @@ describe("handleUserMessage", () => {
           },
         ],
       }),
-      streamText("参数错误"),
+      chatMessage({ role: "assistant", content: "参数错误" }),
     ]);
 
     await handleUserMessage({
@@ -345,7 +422,7 @@ describe("handleUserMessage", () => {
           },
         ],
       }),
-      streamText("未知工具"),
+      chatMessage({ role: "assistant", content: "未知工具" }),
     ]);
 
     await handleUserMessage({
@@ -364,5 +441,96 @@ describe("handleUserMessage", () => {
         content: expect.stringContaining("不支持的工具"),
       }),
     );
+  });
+
+  it("stops when tool calls exceed the maximum tool rounds", async () => {
+    const root = mkdtempSync(join(tmpdir(), "lite-agent-chat-"));
+
+    try {
+      const messages: ChatCompletionMessageParam[] = [];
+      const writes: string[] = [];
+      const client = createQueuedFakeClient([
+        chatMessage({
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            {
+              id: "call_1",
+              type: "function",
+              function: {
+                name: "write_file",
+                arguments: JSON.stringify({
+                  path: "notes/one.txt",
+                  content: "one",
+                }),
+              },
+            },
+          ],
+        }),
+        chatMessage({
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            {
+              id: "call_2",
+              type: "function",
+              function: {
+                name: "write_file",
+                arguments: JSON.stringify({
+                  path: "notes/two.txt",
+                  content: "two",
+                }),
+              },
+            },
+          ],
+        }),
+        chatMessage({
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            {
+              id: "call_3",
+              type: "function",
+              function: {
+                name: "write_file",
+                arguments: JSON.stringify({
+                  path: "notes/three.txt",
+                  content: "three",
+                }),
+              },
+            },
+          ],
+        }),
+      ]);
+
+      await handleUserMessage({
+        client,
+        model: "test-model",
+        writeRoot: root,
+        messages,
+        userInput: "一直写文件",
+        write: (text) => {
+          writes.push(text);
+        },
+        askConfirmation: async () => true,
+      });
+
+      expect(readFileSync(join(root, "notes", "one.txt"), "utf8")).toBe("one");
+      expect(readFileSync(join(root, "notes", "two.txt"), "utf8")).toBe("two");
+      expect(existsSync(join(root, "notes", "three.txt"))).toBe(false);
+      expect(writes).toEqual([
+        "工具调用超过最大轮数 2，已停止继续执行工具。",
+      ]);
+      expect(client.calls).toHaveLength(3);
+      expect(
+        messages.filter((message) => message.role === "tool"),
+      ).toHaveLength(2);
+      expect(messages.at(-1)).toEqual({
+        role: "assistant",
+        content: "工具调用超过最大轮数 2，已停止继续执行工具。",
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
