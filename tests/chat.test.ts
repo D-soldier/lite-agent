@@ -126,10 +126,24 @@ function streamText(text: string): AsyncIterable<unknown> {
   })();
 }
 
+function createSaveRecorder() {
+  const snapshots: ChatCompletionMessageParam[][] = [];
+
+  return {
+    snapshots,
+    saveMessages: async (messages: ChatCompletionMessageParam[]) => {
+      snapshots.push(
+        JSON.parse(JSON.stringify(messages)) as ChatCompletionMessageParam[],
+      );
+    },
+  };
+}
+
 describe("handleUserMessage", () => {
   it("writes a normal assistant response when no tool call is returned", async () => {
     const messages: ChatCompletionMessageParam[] = [];
     const writes: string[] = [];
+    const recorder = createSaveRecorder();
     const client = createQueuedFakeClient([
       chatMessage({ role: "assistant", content: "普通回复" }),
     ]);
@@ -144,12 +158,20 @@ describe("handleUserMessage", () => {
         writes.push(text);
       },
       askConfirmation: async () => true,
+      saveMessages: recorder.saveMessages,
     });
 
     expect(writes).toEqual(["普通回复"]);
     expect(messages).toEqual([
       { role: "user", content: "你好" },
       { role: "assistant", content: "普通回复" },
+    ]);
+    expect(recorder.snapshots).toEqual([
+      [{ role: "user", content: "你好" }],
+      [
+        { role: "user", content: "你好" },
+        { role: "assistant", content: "普通回复" },
+      ],
     ]);
     expect(client.calls).toHaveLength(1);
     expect(client.calls[0]).toMatchObject({
@@ -170,6 +192,7 @@ describe("handleUserMessage", () => {
       const messages: ChatCompletionMessageParam[] = [];
       const writes: string[] = [];
       const confirmations: ConfirmationRequest[] = [];
+      const recorder = createSaveRecorder();
       const client = createQueuedFakeClient([
         chatMessage({
           role: "assistant",
@@ -205,6 +228,7 @@ describe("handleUserMessage", () => {
           confirmations.push(request);
           return true;
         },
+        saveMessages: recorder.saveMessages,
       });
 
       expect(confirmations).toHaveLength(1);
@@ -243,6 +267,42 @@ describe("handleUserMessage", () => {
         role: "assistant",
         content: "写好了",
       });
+      expect(recorder.snapshots).toHaveLength(4);
+      expect(recorder.snapshots[0]).toEqual([
+        { role: "user", content: "写文件" },
+      ]);
+      expect(recorder.snapshots[1]).toEqual([
+        { role: "user", content: "写文件" },
+        expect.objectContaining({
+          role: "assistant",
+          tool_calls: expect.any(Array),
+        }),
+      ]);
+      expect(recorder.snapshots[2]).toEqual([
+        { role: "user", content: "写文件" },
+        expect.objectContaining({
+          role: "assistant",
+          tool_calls: expect.any(Array),
+        }),
+        expect.objectContaining({
+          role: "tool",
+          tool_call_id: "call_1",
+          content: expect.stringContaining('"ok":true'),
+        }),
+      ]);
+      expect(recorder.snapshots[3]).toEqual([
+        { role: "user", content: "写文件" },
+        expect.objectContaining({
+          role: "assistant",
+          tool_calls: expect.any(Array),
+        }),
+        expect.objectContaining({
+          role: "tool",
+          tool_call_id: "call_1",
+          content: expect.stringContaining('"ok":true'),
+        }),
+        { role: "assistant", content: "写好了" },
+      ]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

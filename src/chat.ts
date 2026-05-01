@@ -42,6 +42,10 @@ export type AskConfirmation = (
   request: ConfirmationRequest,
 ) => Promise<boolean>;
 
+export type SaveMessages = (
+  messages: ChatCompletionMessageParam[],
+) => Promise<void>;
+
 export type HandleUserMessageOptions = {
   client: ChatClient;
   model: string;
@@ -50,6 +54,7 @@ export type HandleUserMessageOptions = {
   userInput: string;
   write?: (text: string) => void;
   askConfirmation: AskConfirmation;
+  saveMessages?: SaveMessages;
 };
 
 export function isExitCommand(input: string): boolean {
@@ -208,8 +213,10 @@ export async function handleUserMessage({
     stdout.write(text);
   },
   askConfirmation,
+  saveMessages = async () => undefined,
 }: HandleUserMessageOptions): Promise<void> {
   messages.push({ role: "user", content: userInput });
+  await saveMessages(messages);
 
   let toolRounds = 0;
 
@@ -225,6 +232,7 @@ export async function handleUserMessage({
           write,
         });
         messages.push({ role: "assistant", content: response });
+        await saveMessages(messages);
         return;
       }
 
@@ -235,6 +243,7 @@ export async function handleUserMessage({
       }
 
       messages.push({ role: "assistant", content });
+      await saveMessages(messages);
       return;
     }
 
@@ -243,10 +252,12 @@ export async function handleUserMessage({
 
       write(content);
       messages.push({ role: "assistant", content });
+      await saveMessages(messages);
       return;
     }
 
     messages.push(message as ChatCompletionAssistantMessageParam);
+    await saveMessages(messages);
 
     for (const toolCall of message.tool_calls) {
       const result = await executeToolCall({
@@ -260,6 +271,7 @@ export async function handleUserMessage({
         tool_call_id: toolCall.id,
         content: result,
       });
+      await saveMessages(messages);
     }
 
     toolRounds += 1;
