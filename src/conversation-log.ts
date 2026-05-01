@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, open, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { ChatCompletionMessageParam } from "./chat";
 
@@ -26,31 +26,74 @@ export function formatLogFileName(date: Date): string {
   return `${date.toISOString().replace(/[:.]/g, "-")}.json`;
 }
 
+function formatCandidateLogFileName(date: Date, suffix: number): string {
+  const fileName = formatLogFileName(date);
+
+  if (suffix === 0) {
+    return fileName;
+  }
+
+  return `${fileName.slice(0, -".json".length)}-${suffix}.json`;
+}
+
+function isFileExistsError(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "EEXIST";
+}
+
+async function reserveLogFile(logsDir: string, startedAt: Date): Promise<string> {
+  for (let suffix = 0; ; suffix += 1) {
+    const filePath = join(
+      logsDir,
+      formatCandidateLogFileName(startedAt, suffix),
+    );
+
+    try {
+      const file = await open(filePath, "wx");
+      await file.close();
+      return filePath;
+    } catch (error) {
+      if (isFileExistsError(error)) {
+        continue;
+      }
+
+      throw error;
+    }
+  }
+}
+
 export async function createConversationLogger({
   model,
   logsDir = resolve("logs"),
   now = () => new Date(),
 }: CreateConversationLoggerOptions): Promise<ConversationLogger> {
-  const startedAt = now().toISOString();
-  const filePath = join(logsDir, formatLogFileName(new Date(startedAt)));
+  const startedAtDate = now();
+  const startedAt = startedAtDate.toISOString();
 
   await mkdir(logsDir, { recursive: true });
 
+  const filePath = await reserveLogFile(logsDir, startedAtDate);
+  let writeChain = Promise.resolve();
+
   const logger: ConversationLogger = {
     filePath,
-    save: async (messages) => {
+    save: (messages) => {
       const snapshot: ConversationLogSnapshot = {
         startedAt,
         updatedAt: now().toISOString(),
         model,
         messages,
       };
+      const currentWrite = writeChain.catch(() => undefined).then(async () => {
+        await writeFile(
+          filePath,
+          `${JSON.stringify(snapshot, null, 2)}\n`,
+          "utf8",
+        );
+      });
 
-      await writeFile(
-        filePath,
-        `${JSON.stringify(snapshot, null, 2)}\n`,
-        "utf8",
-      );
+      writeChain = currentWrite;
+
+      return currentWrite;
     },
   };
 
