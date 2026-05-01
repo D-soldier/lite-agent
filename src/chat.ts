@@ -38,7 +38,7 @@ export function formatError(error: unknown): string {
   return String(error);
 }
 
-export async function sendMessage({
+export async function sendPlainMessage({
   client,
   model,
   messages,
@@ -64,6 +64,8 @@ export async function sendMessage({
 
   return response;
 }
+
+export const sendMessage = sendPlainMessage;
 
 export async function runChatLoop({
   client,
@@ -107,7 +109,7 @@ export async function runChatLoop({
       messages.push({ role: "user", content: userInput });
 
       try {
-        const response = await sendMessage({ client, model, messages });
+        const response = await sendPlainMessage({ client, model, messages });
         stdout.write("\n");
         messages.push({ role: "assistant", content: response });
       } catch (error) {
