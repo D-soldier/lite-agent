@@ -89,7 +89,10 @@ export function resolveWritePath(
 
   if (
     relativePath === "" ||
-    (!relativePath.startsWith("..") && !isAbsolute(relativePath))
+    (relativePath !== ".." &&
+      !relativePath.startsWith("../") &&
+      !relativePath.startsWith("..\\") &&
+      !isAbsolute(relativePath))
   ) {
     return target;
   }

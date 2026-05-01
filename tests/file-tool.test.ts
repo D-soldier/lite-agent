@@ -81,6 +81,14 @@ describe("resolveWritePath", () => {
     expect(resolveWritePath(root, target)).toBe(target);
   });
 
+  it("allows root-contained paths whose first segment starts with dots", () => {
+    const root = resolve("sandbox");
+
+    expect(resolveWritePath(root, "..safe/hello.txt")).toBe(
+      join(root, "..safe", "hello.txt"),
+    );
+  });
+
   it("rejects paths outside the write root", () => {
     const root = resolve("sandbox");
 
