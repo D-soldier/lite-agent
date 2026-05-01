@@ -32,6 +32,7 @@ describe("isExitCommand", () => {
   it("accepts exit commands case-insensitively", () => {
     expect(isExitCommand("exit")).toBe(true);
     expect(isExitCommand("Quit")).toBe(true);
+    expect(isExitCommand(" Quit ")).toBe(true);
   });
 
   it("rejects normal messages", () => {
@@ -68,7 +69,7 @@ describe("sendPlainMessage", () => {
     });
 
     expect(calls).toEqual([{ model: "test-model", messages, stream: true }]);
-    expect(writes.join("")).toBe("你好");
+    expect(writes).toEqual(["你", "好"]);
     expect(response).toBe("你好");
   });
 });
