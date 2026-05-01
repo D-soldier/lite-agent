@@ -1,22 +1,55 @@
 import OpenAI from "openai";
 import { stdin, stdout } from "node:process";
-import { createInterface } from "node:readline/promises";
+import { createInterface, type Interface } from "node:readline/promises";
 import type {
+  ChatCompletion,
+  ChatCompletionAssistantMessageParam,
   ChatCompletionChunk,
   ChatCompletionMessageParam,
+  ChatCompletionMessageToolCall,
 } from "openai/resources/chat/completions";
+import {
+  WRITE_FILE_TOOL,
+  parseWriteFileArgs,
+  resolveWritePath,
+  writeFileTool,
+} from "./file-tool";
+
+export const MAX_TOOL_ROUNDS = 2;
+
+export type ChatClient = Pick<OpenAI, "chat">;
 
 export type RunChatLoopOptions = {
-  client: OpenAI;
+  client: ChatClient;
   model: string;
   writeRoot: string;
 };
 
 export type SendMessageOptions = {
-  client: OpenAI;
+  client: ChatClient;
   model: string;
   messages: ChatCompletionMessageParam[];
   write?: (text: string) => void;
+};
+
+export type ConfirmationRequest = {
+  path: string;
+  mode: "overwrite" | "append";
+  contentLength: number;
+};
+
+export type AskConfirmation = (
+  request: ConfirmationRequest,
+) => Promise<boolean>;
+
+export type HandleUserMessageOptions = {
+  client: ChatClient;
+  model: string;
+  writeRoot: string;
+  messages: ChatCompletionMessageParam[];
+  userInput: string;
+  write?: (text: string) => void;
+  askConfirmation: AskConfirmation;
 };
 
 export function isExitCommand(input: string): boolean {
@@ -67,9 +100,154 @@ export async function sendPlainMessage({
 
 export const sendMessage = sendPlainMessage;
 
+export async function askCliConfirmation(
+  rl: Interface,
+  request: ConfirmationRequest,
+): Promise<boolean> {
+  stdout.write(
+    [
+      "\n模型请求写入文件：",
+      `路径：${request.path}`,
+      `模式：${request.mode}`,
+      `内容长度：${request.contentLength}`,
+      "确认写入请输入 y。",
+    ].join("\n"),
+  );
+
+  const answer = await rl.question("\nconfirm> ");
+
+  return answer.trim() === "y";
+}
+
+export async function requestToolOrText({
+  client,
+  model,
+  messages,
+}: {
+  client: ChatClient;
+  model: string;
+  messages: ChatCompletionMessageParam[];
+}): Promise<ChatCompletion["choices"][number]["message"]> {
+  const response = await client.chat.completions.create({
+    model,
+    messages,
+    tools: [WRITE_FILE_TOOL],
+  });
+  const message = (response as ChatCompletion).choices[0]?.message;
+
+  if (!message) {
+    return { role: "assistant", content: "", refusal: null };
+  }
+
+  return message;
+}
+
+function toolResult(content: { ok: boolean; message: string }): string {
+  return JSON.stringify(content);
+}
+
+function parseToolArguments(rawArguments: string): unknown {
+  try {
+    return JSON.parse(rawArguments);
+  } catch {
+    throw new Error("工具参数不是合法 JSON。");
+  }
+}
+
+async function executeToolCall({
+  toolCall,
+  writeRoot,
+  askConfirmation,
+}: {
+  toolCall: ChatCompletionMessageToolCall;
+  writeRoot: string;
+  askConfirmation: AskConfirmation;
+}): Promise<string> {
+  if (toolCall.type !== "function") {
+    return toolResult({
+      ok: false,
+      message: `不支持的工具：${toolCall.type}`,
+    });
+  }
+
+  if (toolCall.function.name !== "write_file") {
+    return toolResult({
+      ok: false,
+      message: `不支持的工具：${toolCall.function.name}`,
+    });
+  }
+
+  try {
+    const args = parseWriteFileArgs(
+      parseToolArguments(toolCall.function.arguments),
+    );
+    const targetPath = resolveWritePath(writeRoot, args.path);
+    const confirmed = await askConfirmation({
+      path: targetPath,
+      mode: args.mode,
+      contentLength: args.content.length,
+    });
+
+    if (!confirmed) {
+      return toolResult({ ok: false, message: "用户拒绝写入。" });
+    }
+
+    return JSON.stringify(await writeFileTool(writeRoot, args));
+  } catch (error) {
+    return toolResult({ ok: false, message: formatError(error) });
+  }
+}
+
+export async function handleUserMessage({
+  client,
+  model,
+  writeRoot,
+  messages,
+  userInput,
+  write = (text) => {
+    stdout.write(text);
+  },
+  askConfirmation,
+}: HandleUserMessageOptions): Promise<void> {
+  messages.push({ role: "user", content: userInput });
+
+  const message = await requestToolOrText({ client, model, messages });
+
+  if (!message.tool_calls || message.tool_calls.length === 0) {
+    const content = message.content ?? "";
+
+    if (content.length > 0) {
+      write(content);
+    }
+
+    messages.push({ role: "assistant", content });
+    return;
+  }
+
+  messages.push(message as ChatCompletionAssistantMessageParam);
+
+  for (const toolCall of message.tool_calls) {
+    const result = await executeToolCall({
+      toolCall,
+      writeRoot,
+      askConfirmation,
+    });
+
+    messages.push({
+      role: "tool",
+      tool_call_id: toolCall.id,
+      content: result,
+    });
+  }
+
+  const response = await sendPlainMessage({ client, model, messages, write });
+  messages.push({ role: "assistant", content: response });
+}
+
 export async function runChatLoop({
   client,
   model,
+  writeRoot,
 }: RunChatLoopOptions): Promise<void> {
   const rl = createInterface({ input: stdin, output: stdout });
   const messages: ChatCompletionMessageParam[] = [];
@@ -106,12 +284,16 @@ export async function runChatLoop({
         break;
       }
 
-      messages.push({ role: "user", content: userInput });
-
       try {
-        const response = await sendPlainMessage({ client, model, messages });
+        await handleUserMessage({
+          client,
+          model,
+          writeRoot,
+          messages,
+          userInput,
+          askConfirmation: (request) => askCliConfirmation(rl, request),
+        });
         stdout.write("\n");
-        messages.push({ role: "assistant", content: response });
       } catch (error) {
         stdout.write(`\n请求失败：${formatError(error)}\n`);
       }

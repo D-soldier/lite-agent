@@ -1,10 +1,17 @@
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type OpenAI from "openai";
 import {
   extractDelta,
+  handleUserMessage,
   isExitCommand,
   sendMessage,
   sendPlainMessage,
+  type ChatClient,
+  type ChatCompletionMessageParam,
+  type ConfirmationRequest,
 } from "../src/chat";
 
 function createFakeClient() {
@@ -77,5 +84,285 @@ describe("sendPlainMessage", () => {
 describe("sendMessage", () => {
   it("remains an alias for sendPlainMessage", () => {
     expect(sendMessage).toBe(sendPlainMessage);
+  });
+});
+
+type FakeChatClient = ChatClient & {
+  calls: unknown[];
+};
+
+function createQueuedFakeClient(responses: unknown[]): FakeChatClient {
+  const calls: unknown[] = [];
+  const client = {
+    calls,
+    chat: {
+      completions: {
+        create: async (request: unknown) => {
+          calls.push(request);
+          const response = responses.shift();
+
+          if (response === undefined) {
+            throw new Error("No fake response configured");
+          }
+
+          return response;
+        },
+      },
+    },
+  } as unknown as FakeChatClient;
+
+  return client;
+}
+
+function chatMessage(message: unknown): unknown {
+  return {
+    choices: [{ message }],
+  };
+}
+
+function streamText(text: string): AsyncIterable<unknown> {
+  return (async function* () {
+    yield { choices: [{ delta: { content: text } }] };
+  })();
+}
+
+describe("handleUserMessage", () => {
+  it("writes a normal assistant response when no tool call is returned", async () => {
+    const messages: ChatCompletionMessageParam[] = [];
+    const writes: string[] = [];
+    const client = createQueuedFakeClient([
+      chatMessage({ role: "assistant", content: "普通回复" }),
+    ]);
+
+    await handleUserMessage({
+      client,
+      model: "test-model",
+      writeRoot: process.cwd(),
+      messages,
+      userInput: "你好",
+      write: (text) => {
+        writes.push(text);
+      },
+      askConfirmation: async () => true,
+    });
+
+    expect(writes).toEqual(["普通回复"]);
+    expect(messages).toEqual([
+      { role: "user", content: "你好" },
+      { role: "assistant", content: "普通回复" },
+    ]);
+    expect(client.calls).toHaveLength(1);
+    expect(client.calls[0]).toMatchObject({
+      model: "test-model",
+      messages,
+      tools: [
+        expect.objectContaining({
+          function: expect.objectContaining({ name: "write_file" }),
+        }),
+      ],
+    });
+  });
+
+  it("confirms write_file, writes a file, sends tool result, and streams final response", async () => {
+    const root = mkdtempSync(join(tmpdir(), "lite-agent-chat-"));
+
+    try {
+      const messages: ChatCompletionMessageParam[] = [];
+      const writes: string[] = [];
+      const confirmations: ConfirmationRequest[] = [];
+      const client = createQueuedFakeClient([
+        chatMessage({
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            {
+              id: "call_1",
+              type: "function",
+              function: {
+                name: "write_file",
+                arguments: JSON.stringify({
+                  path: "notes/hello.txt",
+                  content: "hello",
+                }),
+              },
+            },
+          ],
+        }),
+        streamText("写好了"),
+      ]);
+
+      await handleUserMessage({
+        client,
+        model: "test-model",
+        writeRoot: root,
+        messages,
+        userInput: "写文件",
+        write: (text) => {
+          writes.push(text);
+        },
+        askConfirmation: async (request) => {
+          confirmations.push(request);
+          return true;
+        },
+      });
+
+      expect(confirmations).toHaveLength(1);
+      expect(confirmations[0]).toMatchObject({
+        path: join(root, "notes", "hello.txt"),
+        mode: "overwrite",
+        contentLength: 5,
+      });
+      expect(readFileSync(join(root, "notes", "hello.txt"), "utf8")).toBe(
+        "hello",
+      );
+      expect(writes).toEqual(["写好了"]);
+      expect(client.calls).toHaveLength(2);
+      expect(client.calls[0]).toMatchObject({
+        model: "test-model",
+        tools: expect.any(Array),
+      });
+      expect(client.calls[1]).toMatchObject({
+        model: "test-model",
+        messages,
+        stream: true,
+      });
+      expect(messages).toContainEqual(
+        expect.objectContaining({
+          role: "tool",
+          tool_call_id: "call_1",
+          content: expect.stringContaining('"ok":true'),
+        }),
+      );
+      expect(messages.at(-1)).toEqual({
+        role: "assistant",
+        content: "写好了",
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not write when the user rejects confirmation", async () => {
+    const root = mkdtempSync(join(tmpdir(), "lite-agent-chat-"));
+
+    try {
+      const messages: ChatCompletionMessageParam[] = [];
+      const client = createQueuedFakeClient([
+        chatMessage({
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            {
+              id: "call_1",
+              type: "function",
+              function: {
+                name: "write_file",
+                arguments: JSON.stringify({
+                  path: "notes/hello.txt",
+                  content: "hello",
+                }),
+              },
+            },
+          ],
+        }),
+        streamText("已取消"),
+      ]);
+
+      await handleUserMessage({
+        client,
+        model: "test-model",
+        writeRoot: root,
+        messages,
+        userInput: "写文件",
+        write: () => undefined,
+        askConfirmation: async () => false,
+      });
+
+      expect(existsSync(join(root, "notes", "hello.txt"))).toBe(false);
+      expect(messages).toContainEqual(
+        expect.objectContaining({
+          role: "tool",
+          content: expect.stringContaining("用户拒绝写入。"),
+        }),
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("returns a tool error when arguments are invalid JSON", async () => {
+    const messages: ChatCompletionMessageParam[] = [];
+    const client = createQueuedFakeClient([
+      chatMessage({
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: "call_1",
+            type: "function",
+            function: {
+              name: "write_file",
+              arguments: "{bad json",
+            },
+          },
+        ],
+      }),
+      streamText("参数错误"),
+    ]);
+
+    await handleUserMessage({
+      client,
+      model: "test-model",
+      writeRoot: process.cwd(),
+      messages,
+      userInput: "写文件",
+      write: () => undefined,
+      askConfirmation: async () => true,
+    });
+
+    expect(messages).toContainEqual(
+      expect.objectContaining({
+        role: "tool",
+        content: expect.stringContaining("JSON"),
+      }),
+    );
+  });
+
+  it("returns a tool error for unknown tools", async () => {
+    const messages: ChatCompletionMessageParam[] = [];
+    const client = createQueuedFakeClient([
+      chatMessage({
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: "call_1",
+            type: "function",
+            function: {
+              name: "unknown_tool",
+              arguments: "{}",
+            },
+          },
+        ],
+      }),
+      streamText("未知工具"),
+    ]);
+
+    await handleUserMessage({
+      client,
+      model: "test-model",
+      writeRoot: process.cwd(),
+      messages,
+      userInput: "调用工具",
+      write: () => undefined,
+      askConfirmation: async () => true,
+    });
+
+    expect(messages).toContainEqual(
+      expect.objectContaining({
+        role: "tool",
+        content: expect.stringContaining("不支持的工具"),
+      }),
+    );
   });
 });
