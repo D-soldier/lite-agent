@@ -14,6 +14,10 @@ import {
   resolveWritePath,
   writeFileTool,
 } from "./file-tool";
+import {
+  createConversationLogger,
+  type ConversationLogger,
+} from "./conversation-log";
 
 export const MAX_TOOL_ROUNDS = 2;
 
@@ -23,7 +27,12 @@ export type RunChatLoopOptions = {
   client: ChatClient;
   model: string;
   writeRoot: string;
+  createLogger?: CreateConversationLogger;
 };
+
+export type CreateConversationLogger = (options: {
+  model: string;
+}) => Promise<ConversationLogger>;
 
 export type SendMessageOptions = {
   client: ChatClient;
@@ -282,7 +291,11 @@ export async function runChatLoop({
   client,
   model,
   writeRoot,
+  createLogger = createConversationLogger,
 }: RunChatLoopOptions): Promise<void> {
+  const logger = await createLogger({ model });
+  const saveMessages: SaveMessages = (nextMessages) =>
+    logger.save(nextMessages);
   const rl = createInterface({ input: stdin, output: stdout });
   const messages: ChatCompletionMessageParam[] = [];
   let interrupted = false;
@@ -326,6 +339,7 @@ export async function runChatLoop({
           messages,
           userInput,
           askConfirmation: (request) => askCliConfirmation(rl, request),
+          saveMessages,
         });
         stdout.write("\n");
       } catch (error) {
