@@ -1,5 +1,5 @@
 import { stdout } from "node:process";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatCompletionMessageParam } from "../src/chat";
 
 const readlineMock = vi.hoisted(() => ({
@@ -51,6 +51,10 @@ describe("runChatLoop", () => {
       question: readlineMock.question,
       close: readlineMock.close,
     });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   it("creates one logger and saves message snapshots", async () => {

@@ -1,4 +1,10 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -26,6 +32,10 @@ function readJson(path: string): unknown {
 
 function readText(path: string): string {
   return readFileSync(path, "utf8");
+}
+
+function listTempFiles(path: string): string[] {
+  return readdirSync(path).filter((fileName) => fileName.endsWith(".tmp"));
 }
 
 describe("formatLogFileName", () => {
@@ -66,6 +76,7 @@ describe("createConversationLogger", () => {
       });
       expect(readText(logger.filePath)).toContain('  "model": "test-model"');
       expect(readText(logger.filePath).endsWith("\n")).toBe(true);
+      expect(listTempFiles(logsDir)).toEqual([]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

@@ -1,4 +1,4 @@
-import { mkdir, open, writeFile } from "node:fs/promises";
+import { mkdir, open, rename, unlink, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { ChatCompletionMessageParam } from "./chat";
 
@@ -22,6 +22,8 @@ export type CreateConversationLoggerOptions = {
   now?: Clock;
 };
 
+let nextWriteId = 0;
+
 export function formatLogFileName(date: Date): string {
   return `${date.toISOString().replace(/[:.]/g, "-")}.json`;
 }
@@ -38,6 +40,26 @@ function formatCandidateLogFileName(date: Date, suffix: number): string {
 
 function isFileExistsError(error: unknown): boolean {
   return error instanceof Error && "code" in error && error.code === "EEXIST";
+}
+
+function getTempFilePath(filePath: string): string {
+  nextWriteId += 1;
+  return `${filePath}.${process.pid}.${nextWriteId}.tmp`;
+}
+
+async function writeFileAtomically(
+  filePath: string,
+  contents: string,
+): Promise<void> {
+  const tempPath = getTempFilePath(filePath);
+
+  try {
+    await writeFile(tempPath, contents, "utf8");
+    await rename(tempPath, filePath);
+  } catch (error) {
+    await unlink(tempPath).catch(() => undefined);
+    throw error;
+  }
 }
 
 async function reserveLogFile(logsDir: string, startedAt: Date): Promise<string> {
@@ -84,10 +106,9 @@ export async function createConversationLogger({
         messages,
       };
       const currentWrite = writeChain.catch(() => undefined).then(async () => {
-        await writeFile(
+        await writeFileAtomically(
           filePath,
           `${JSON.stringify(snapshot, null, 2)}\n`,
-          "utf8",
         );
       });
 
