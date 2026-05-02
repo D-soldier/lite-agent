@@ -118,7 +118,12 @@ export async function createConversationLogger({
     },
   };
 
-  await logger.save([]);
+  try {
+    await logger.save([]);
+  } catch (error) {
+    await unlink(filePath).catch(() => undefined);
+    throw error;
+  }
 
   return logger;
 }

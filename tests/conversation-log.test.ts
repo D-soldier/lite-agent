@@ -7,13 +7,37 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ChatCompletionMessageParam } from "../src/chat";
 import {
   createConversationLogger,
   formatLogFileName,
   type Clock,
 } from "../src/conversation-log";
+
+const fsMockState = vi.hoisted(() => ({
+  failNextWrite: false,
+  initialSaveError: new Error("initial save failed"),
+}));
+
+vi.mock("node:fs/promises", async () => {
+  const actual =
+    await vi.importActual<typeof import("node:fs/promises")>(
+      "node:fs/promises",
+    );
+
+  return {
+    ...actual,
+    writeFile: async (...args: Parameters<typeof actual.writeFile>) => {
+      if (fsMockState.failNextWrite) {
+        fsMockState.failNextWrite = false;
+        throw fsMockState.initialSaveError;
+      }
+
+      return actual.writeFile(...args);
+    },
+  };
+});
 
 function createSequenceClock(values: string[]): Clock {
   const dates = values.map((value) => new Date(value));
@@ -36,6 +60,10 @@ function readText(path: string): string {
 
 function listTempFiles(path: string): string[] {
   return readdirSync(path).filter((fileName) => fileName.endsWith(".tmp"));
+}
+
+function listJsonFiles(path: string): string[] {
+  return readdirSync(path).filter((fileName) => fileName.endsWith(".json"));
 }
 
 describe("formatLogFileName", () => {
@@ -78,6 +106,32 @@ describe("createConversationLogger", () => {
       expect(readText(logger.filePath).endsWith("\n")).toBe(true);
       expect(listTempFiles(logsDir)).toEqual([]);
     } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("removes the reserved log file and temp file when the initial save fails", async () => {
+    const root = mkdtempSync(join(tmpdir(), "lite-agent-log-"));
+    const logsDir = join(root, "logs");
+
+    try {
+      fsMockState.failNextWrite = true;
+
+      await expect(
+        createConversationLogger({
+          model: "test-model",
+          logsDir,
+          now: createSequenceClock([
+            "2026-05-01T14:30:20.123Z",
+            "2026-05-01T14:30:20.456Z",
+          ]),
+        }),
+      ).rejects.toBe(fsMockState.initialSaveError);
+
+      expect(listJsonFiles(logsDir)).toEqual([]);
+      expect(listTempFiles(logsDir)).toEqual([]);
+    } finally {
+      fsMockState.failNextWrite = false;
       rmSync(root, { recursive: true, force: true });
     }
   });
