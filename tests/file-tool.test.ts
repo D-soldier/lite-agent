@@ -11,7 +11,9 @@ import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  READ_FILE_TOOL,
   WRITE_FILE_TOOL,
+  parseReadFileArgs,
   parseWriteFileArgs,
   resolveWritePath,
   writeFileTool,
@@ -29,6 +31,27 @@ describe("WRITE_FILE_TOOL", () => {
       type: "object",
       required: ["path", "content"],
       additionalProperties: false,
+    });
+  });
+});
+
+describe("READ_FILE_TOOL", () => {
+  it("defines the read_file function schema", () => {
+    expect(READ_FILE_TOOL.type).toBe("function");
+    if (READ_FILE_TOOL.type !== "function") {
+      throw new Error("Expected function tool");
+    }
+
+    expect(READ_FILE_TOOL.function.name).toBe("read_file");
+    expect(READ_FILE_TOOL.function.parameters).toMatchObject({
+      type: "object",
+      required: ["path"],
+      additionalProperties: false,
+      properties: {
+        path: { type: "string" },
+        offset: { type: "integer", minimum: 0 },
+        maxBytes: { type: "integer", minimum: 1, maximum: 262144 },
+      },
     });
   });
 });
@@ -63,6 +86,47 @@ describe("parseWriteFileArgs", () => {
     expect(() =>
       parseWriteFileArgs({ path: "a.txt", content: "hello", mode: "bad" }),
     ).toThrow("mode");
+  });
+});
+
+describe("parseReadFileArgs", () => {
+  it("defaults offset to zero and maxBytes to 256KB", () => {
+    expect(parseReadFileArgs({ path: "notes/hello.txt" })).toEqual({
+      path: "notes/hello.txt",
+      offset: 0,
+      maxBytes: 262144,
+    });
+  });
+
+  it("accepts explicit offset and maxBytes", () => {
+    expect(
+      parseReadFileArgs({
+        path: "notes/hello.txt",
+        offset: 12,
+        maxBytes: 4096,
+      }),
+    ).toEqual({
+      path: "notes/hello.txt",
+      offset: 12,
+      maxBytes: 4096,
+    });
+  });
+
+  it("rejects invalid args", () => {
+    expect(() => parseReadFileArgs(null)).toThrow("object");
+    expect(() => parseReadFileArgs({ path: "" })).toThrow("path");
+    expect(() => parseReadFileArgs({ path: "notes/hello.txt", offset: -1 }))
+      .toThrow("offset");
+    expect(() => parseReadFileArgs({ path: "notes/hello.txt", offset: 1.5 }))
+      .toThrow("offset");
+    expect(() => parseReadFileArgs({ path: "notes/hello.txt", maxBytes: 0 }))
+      .toThrow("maxBytes");
+    expect(() =>
+      parseReadFileArgs({ path: "notes/hello.txt", maxBytes: 1.5 }),
+    ).toThrow("maxBytes");
+    expect(() =>
+      parseReadFileArgs({ path: "notes/hello.txt", maxBytes: 262145 }),
+    ).toThrow("maxBytes");
   });
 });
 

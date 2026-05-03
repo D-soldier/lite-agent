@@ -38,6 +38,42 @@ export const WRITE_FILE_TOOL: ChatCompletionTool = {
   },
 };
 
+export const DEFAULT_READ_MAX_BYTES = 262_144;
+export const MAX_READ_BYTES = 262_144;
+
+export const READ_FILE_TOOL: ChatCompletionTool = {
+  type: "function",
+  function: {
+    name: "read_file",
+    description:
+      "Read text content from a file inside the configured write root.",
+    parameters: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description:
+            "Path to read, relative to the configured write root unless it is already inside the write root.",
+        },
+        offset: {
+          type: "integer",
+          minimum: 0,
+          description: "Byte offset to start reading from. Defaults to 0.",
+        },
+        maxBytes: {
+          type: "integer",
+          minimum: 1,
+          maximum: MAX_READ_BYTES,
+          description:
+            "Maximum bytes to read. Defaults to 262144 and cannot exceed 262144.",
+        },
+      },
+      required: ["path"],
+      additionalProperties: false,
+    },
+  },
+};
+
 export type WriteMode = "overwrite" | "append";
 
 export type WriteFileArgs = {
@@ -51,6 +87,23 @@ export type WriteFileResult = {
   path?: string;
   mode?: WriteMode;
   bytes?: number;
+  message: string;
+};
+
+export type ReadFileArgs = {
+  path: string;
+  offset: number;
+  maxBytes: number;
+};
+
+export type ReadFileResult = {
+  ok: boolean;
+  path?: string;
+  offset?: number;
+  bytesRead?: number;
+  nextOffset?: number;
+  truncated?: boolean;
+  content?: string;
   message: string;
 };
 
@@ -80,6 +133,42 @@ export function parseWriteFileArgs(raw: unknown): WriteFileArgs {
     path,
     content,
     mode,
+  };
+}
+
+export function parseReadFileArgs(raw: unknown): ReadFileArgs {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("read_file args must be an object.");
+  }
+
+  const value = raw as Record<string, unknown>;
+  const path = value.path;
+  const offset = value.offset ?? 0;
+  const maxBytes = value.maxBytes ?? DEFAULT_READ_MAX_BYTES;
+
+  if (typeof path !== "string" || path.trim().length === 0) {
+    throw new Error("read_file.path must be a non-empty string.");
+  }
+
+  if (typeof offset !== "number" || !Number.isInteger(offset) || offset < 0) {
+    throw new Error("read_file.offset must be a non-negative integer.");
+  }
+
+  if (
+    typeof maxBytes !== "number" ||
+    !Number.isInteger(maxBytes) ||
+    maxBytes < 1 ||
+    maxBytes > MAX_READ_BYTES
+  ) {
+    throw new Error(
+      `read_file.maxBytes must be an integer between 1 and ${MAX_READ_BYTES}.`,
+    );
+  }
+
+  return {
+    path,
+    offset,
+    maxBytes,
   };
 }
 
