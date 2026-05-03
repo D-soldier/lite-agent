@@ -1,4 +1,11 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -174,15 +181,14 @@ describe("handleUserMessage", () => {
       ],
     ]);
     expect(client.calls).toHaveLength(1);
-    expect(client.calls[0]).toMatchObject({
-      model: "test-model",
-      messages,
-      tools: [
-        expect.objectContaining({
-          function: expect.objectContaining({ name: "write_file" }),
-        }),
-      ],
-    });
+    const firstRequest = client.calls[0] as {
+      tools?: Array<{ function?: { name?: string } }>;
+    };
+
+    expect(firstRequest.tools?.map((tool) => tool.function?.name)).toEqual([
+      "write_file",
+      "read_file",
+    ]);
   });
 
   it("confirms write_file, writes a file, sends tool result, and streams final response", async () => {
@@ -303,6 +309,156 @@ describe("handleUserMessage", () => {
         }),
         { role: "assistant", content: "写好了" },
       ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("executes read_file without confirmation and streams the final response", async () => {
+    const root = mkdtempSync(join(tmpdir(), "lite-agent-chat-"));
+
+    try {
+      const targetDir = join(root, "notes");
+      mkdirSync(targetDir);
+      writeFileSync(join(targetDir, "hello.txt"), "hello world");
+
+      const messages: ChatCompletionMessageParam[] = [];
+      const writes: string[] = [];
+      let confirmationCalls = 0;
+      const client = createQueuedFakeClient([
+        chatMessage({
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            {
+              id: "call_read_1",
+              type: "function",
+              function: {
+                name: "read_file",
+                arguments: JSON.stringify({
+                  path: "notes/hello.txt",
+                  maxBytes: 5,
+                }),
+              },
+            },
+          ],
+        }),
+        chatMessage({ role: "assistant", content: "ready to answer" }),
+        streamText("read done"),
+      ]);
+
+      await handleUserMessage({
+        client,
+        model: "test-model",
+        writeRoot: root,
+        messages,
+        userInput: "read a file",
+        write: (text) => {
+          writes.push(text);
+        },
+        askConfirmation: async () => {
+          confirmationCalls += 1;
+          throw new Error("read_file should not ask for confirmation");
+        },
+      });
+
+      const toolMessage = messages.find((message) => message.role === "tool");
+      if (!toolMessage || typeof toolMessage.content !== "string") {
+        throw new Error("Expected read_file tool message");
+      }
+      const payload = JSON.parse(toolMessage.content) as Record<
+        string,
+        unknown
+      >;
+
+      expect(confirmationCalls).toBe(0);
+      expect(payload).toMatchObject({
+        ok: true,
+        offset: 0,
+        bytesRead: 5,
+        nextOffset: 5,
+        truncated: true,
+        content: "hello",
+      });
+      expect(writes).toEqual(["read done"]);
+      expect(client.calls).toHaveLength(3);
+      expect(client.calls[2]).toMatchObject({
+        model: "test-model",
+        messages,
+        stream: true,
+      });
+      expect(messages.at(-1)).toEqual({
+        role: "assistant",
+        content: "read done",
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("returns a read_file tool error and still streams the final response", async () => {
+    const root = mkdtempSync(join(tmpdir(), "lite-agent-chat-"));
+
+    try {
+      writeFileSync(join(root, "short.txt"), "abc");
+
+      const messages: ChatCompletionMessageParam[] = [];
+      const writes: string[] = [];
+      let confirmationCalls = 0;
+      const client = createQueuedFakeClient([
+        chatMessage({
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            {
+              id: "call_read_1",
+              type: "function",
+              function: {
+                name: "read_file",
+                arguments: JSON.stringify({
+                  path: "short.txt",
+                  offset: 4,
+                }),
+              },
+            },
+          ],
+        }),
+        chatMessage({ role: "assistant", content: "ready to answer" }),
+        streamText("read failed"),
+      ]);
+
+      await handleUserMessage({
+        client,
+        model: "test-model",
+        writeRoot: root,
+        messages,
+        userInput: "read past the end",
+        write: (text) => {
+          writes.push(text);
+        },
+        askConfirmation: async () => {
+          confirmationCalls += 1;
+          throw new Error("read_file should not ask for confirmation");
+        },
+      });
+
+      const toolMessage = messages.find((message) => message.role === "tool");
+      if (!toolMessage || typeof toolMessage.content !== "string") {
+        throw new Error("Expected read_file tool message");
+      }
+      const payload = JSON.parse(toolMessage.content) as Record<
+        string,
+        unknown
+      >;
+
+      expect(confirmationCalls).toBe(0);
+      expect(payload.ok).toBe(false);
+      expect(payload.message).toEqual(expect.stringContaining("offset"));
+      expect(writes).toEqual(["read failed"]);
+      expect(messages.at(-1)).toEqual({
+        role: "assistant",
+        content: "read failed",
+      });
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

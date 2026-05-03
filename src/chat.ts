@@ -9,8 +9,10 @@ import type {
   ChatCompletionMessageToolCall,
 } from "openai/resources/chat/completions";
 import {
+  READ_FILE_TOOL,
   WRITE_FILE_TOOL,
   parseWriteFileArgs,
+  readFileTool,
   resolveWritePath,
   writeFileTool,
 } from "./file-tool";
@@ -20,6 +22,7 @@ import {
 } from "./conversation-log";
 
 export const MAX_TOOL_ROUNDS = 2;
+export const AVAILABLE_TOOLS = [WRITE_FILE_TOOL, READ_FILE_TOOL];
 
 export type ChatClient = Pick<OpenAI, "chat">;
 
@@ -145,7 +148,7 @@ export async function requestToolOrText({
   const response = await client.chat.completions.create({
     model,
     messages,
-    tools: [WRITE_FILE_TOOL],
+    tools: AVAILABLE_TOOLS,
   });
   const message = (response as ChatCompletion).choices[0]?.message;
 
@@ -184,32 +187,42 @@ async function executeToolCall({
     });
   }
 
-  if (toolCall.function.name !== "write_file") {
-    return toolResult({
-      ok: false,
-      message: `不支持的工具：${toolCall.function.name}`,
-    });
-  }
+  if (toolCall.function.name === "read_file") {
+    try {
+      const args = parseToolArguments(toolCall.function.arguments);
 
-  try {
-    const args = parseWriteFileArgs(
-      parseToolArguments(toolCall.function.arguments),
-    );
-    const targetPath = resolveWritePath(writeRoot, args.path);
-    const confirmed = await askConfirmation({
-      path: targetPath,
-      mode: args.mode,
-      contentLength: args.content.length,
-    });
-
-    if (!confirmed) {
-      return toolResult({ ok: false, message: "用户拒绝写入。" });
+      return JSON.stringify(await readFileTool(writeRoot, args));
+    } catch (error) {
+      return toolResult({ ok: false, message: formatError(error) });
     }
-
-    return JSON.stringify(await writeFileTool(writeRoot, args));
-  } catch (error) {
-    return toolResult({ ok: false, message: formatError(error) });
   }
+
+  if (toolCall.function.name === "write_file") {
+    try {
+      const args = parseWriteFileArgs(
+        parseToolArguments(toolCall.function.arguments),
+      );
+      const targetPath = resolveWritePath(writeRoot, args.path);
+      const confirmed = await askConfirmation({
+        path: targetPath,
+        mode: args.mode,
+        contentLength: args.content.length,
+      });
+
+      if (!confirmed) {
+        return toolResult({ ok: false, message: "用户拒绝写入。" });
+      }
+
+      return JSON.stringify(await writeFileTool(writeRoot, args));
+    } catch (error) {
+      return toolResult({ ok: false, message: formatError(error) });
+    }
+  }
+
+  return toolResult({
+    ok: false,
+    message: `不支持的工具：${toolCall.function.name}`,
+  });
 }
 
 export async function handleUserMessage({
