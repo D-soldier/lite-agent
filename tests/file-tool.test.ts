@@ -15,6 +15,7 @@ import {
   WRITE_FILE_TOOL,
   parseReadFileArgs,
   parseWriteFileArgs,
+  readFileTool,
   resolveWritePath,
   writeFileTool,
 } from "../src/file-tool";
@@ -291,6 +292,215 @@ describe("writeFileTool", () => {
 
       expect(result.ok).toBe(false);
       expect(readFileSync(outsideTarget, "utf8")).toBe("outside");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("readFileTool", () => {
+  it("reads a relative text file", async () => {
+    const root = mkdtempSync(join(tmpdir(), "lite-agent-read-"));
+
+    try {
+      const targetDir = join(root, "notes");
+      const target = join(targetDir, "hello.txt");
+      mkdirSync(targetDir);
+      writeFileSync(target, "hello world");
+
+      const result = await readFileTool(root, {
+        path: "notes/hello.txt",
+      });
+
+      expect(result).toMatchObject({
+        ok: true,
+        path: target,
+        offset: 0,
+        bytesRead: 11,
+        nextOffset: 11,
+        truncated: false,
+        content: "hello world",
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reads from an offset and reports truncation", async () => {
+    const root = mkdtempSync(join(tmpdir(), "lite-agent-read-"));
+
+    try {
+      const target = join(root, "sample.txt");
+      writeFileSync(target, "abcdef");
+
+      const result = await readFileTool(root, {
+        path: "sample.txt",
+        offset: 2,
+        maxBytes: 3,
+      });
+
+      expect(result).toMatchObject({
+        ok: true,
+        offset: 2,
+        bytesRead: 3,
+        nextOffset: 5,
+        truncated: true,
+        content: "cde",
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("returns empty content when offset equals file size", async () => {
+    const root = mkdtempSync(join(tmpdir(), "lite-agent-read-"));
+
+    try {
+      const target = join(root, "sample.txt");
+      writeFileSync(target, "abc");
+
+      const result = await readFileTool(root, {
+        path: "sample.txt",
+        offset: 3,
+      });
+
+      expect(result).toMatchObject({
+        ok: true,
+        offset: 3,
+        bytesRead: 0,
+        nextOffset: 3,
+        truncated: false,
+        content: "",
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("fails when offset is larger than file size", async () => {
+    const root = mkdtempSync(join(tmpdir(), "lite-agent-read-"));
+
+    try {
+      const target = join(root, "sample.txt");
+      writeFileSync(target, "abc");
+
+      const result = await readFileTool(root, {
+        path: "sample.txt",
+        offset: 4,
+      });
+
+      expect(result.ok).toBe(false);
+      expect(result.message).toContain("offset");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("fails for directories and missing files", async () => {
+    const root = mkdtempSync(join(tmpdir(), "lite-agent-read-"));
+
+    try {
+      mkdirSync(join(root, "notes"));
+
+      const directoryResult = await readFileTool(root, { path: "notes" });
+      const missingResult = await readFileTool(root, { path: "missing.txt" });
+
+      expect(directoryResult.ok).toBe(false);
+      expect(directoryResult.message).toContain("file");
+      expect(missingResult.ok).toBe(false);
+      expect(missingResult.message).toContain("exist");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not read paths outside the write root", async () => {
+    const root = mkdtempSync(join(tmpdir(), "lite-agent-read-"));
+
+    try {
+      const outsideName = `${basename(root)}-outside.txt`;
+      const outsidePath = resolve(root, "..", outsideName);
+      writeFileSync(outsidePath, "secret");
+
+      const result = await readFileTool(root, {
+        path: `../${outsideName}`,
+      });
+
+      expect(result.ok).toBe(false);
+      expect(result.message).toContain("write root");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(resolve(root, "..", `${basename(root)}-outside.txt`), {
+        force: true,
+      });
+    }
+  });
+
+  it("does not follow a directory symlink or junction outside the write root", async () => {
+    const root = mkdtempSync(join(tmpdir(), "lite-agent-read-"));
+    const outside = mkdtempSync(join(tmpdir(), "lite-agent-outside-"));
+
+    try {
+      const linkPath = join(root, "link");
+      writeFileSync(join(outside, "outside.txt"), "secret");
+
+      try {
+        symlinkSync(
+          outside,
+          linkPath,
+          process.platform === "win32" ? "junction" : "dir",
+        );
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          "code" in error &&
+          (error.code === "EPERM" || error.code === "EACCES")
+        ) {
+          return;
+        }
+        throw error;
+      }
+
+      const result = await readFileTool(root, {
+        path: "link/outside.txt",
+      });
+
+      expect(result.ok).toBe(false);
+      expect(result.message).toContain("linked");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("does not read an existing symlink file", async () => {
+    const root = mkdtempSync(join(tmpdir(), "lite-agent-read-"));
+    const outside = mkdtempSync(join(tmpdir(), "lite-agent-outside-"));
+
+    try {
+      const outsideTarget = join(outside, "target.txt");
+      writeFileSync(outsideTarget, "secret");
+
+      try {
+        symlinkSync(outsideTarget, join(root, "target.txt"), "file");
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          "code" in error &&
+          (error.code === "EPERM" || error.code === "EACCES")
+        ) {
+          return;
+        }
+        throw error;
+      }
+
+      const result = await readFileTool(root, {
+        path: "target.txt",
+      });
+
+      expect(result.ok).toBe(false);
+      expect(result.message).toContain("symbolic link");
     } finally {
       rmSync(root, { recursive: true, force: true });
       rmSync(outside, { recursive: true, force: true });

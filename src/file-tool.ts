@@ -2,6 +2,7 @@ import {
   appendFile,
   lstat,
   mkdir,
+  open,
   realpath,
   writeFile,
 } from "node:fs/promises";
@@ -273,6 +274,47 @@ async function ensureSafeWriteTarget(
   }
 }
 
+async function ensureSafeReadTarget(
+  writeRoot: string,
+  targetPath: string,
+): Promise<{ size: number }> {
+  const root = resolve(writeRoot);
+
+  await mkdir(root, { recursive: true });
+  const realRoot = await realpath(root);
+
+  await rejectLinkedExistingAncestors(root, dirname(targetPath));
+
+  let targetStats;
+  try {
+    targetStats = await lstat(targetPath);
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      "code" in error &&
+      error.code === "ENOENT"
+    ) {
+      throw new Error(`Target file does not exist: ${targetPath}`);
+    }
+    throw error;
+  }
+
+  if (targetStats.isSymbolicLink()) {
+    throw new Error(`Target file is a symbolic link: ${targetPath}`);
+  }
+
+  if (!targetStats.isFile()) {
+    throw new Error(`Target path is not a file: ${targetPath}`);
+  }
+
+  const realTarget = await realpath(targetPath);
+  if (!isPathInside(realRoot, realTarget)) {
+    throw new Error(`Target path resolves outside the write root: ${realRoot}`);
+  }
+
+  return { size: targetStats.size };
+}
+
 export async function writeFileTool(
   writeRoot: string,
   rawArgs: unknown,
@@ -294,6 +336,60 @@ export async function writeFileTool(
       mode: args.mode,
       bytes: Buffer.byteLength(args.content, "utf8"),
       message: `Wrote file: ${targetPath}`,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      message: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+export async function readFileTool(
+  writeRoot: string,
+  rawArgs: unknown,
+): Promise<ReadFileResult> {
+  try {
+    const args = parseReadFileArgs(rawArgs);
+    const targetPath = resolveWritePath(writeRoot, args.path);
+    const { size } = await ensureSafeReadTarget(writeRoot, targetPath);
+
+    if (args.offset > size) {
+      throw new Error(
+        `read_file.offset ${args.offset} is larger than file size ${size}.`,
+      );
+    }
+
+    const requestedBytes = Math.min(args.maxBytes, size - args.offset);
+    const buffer = Buffer.alloc(requestedBytes);
+    let bytesRead = 0;
+
+    if (requestedBytes > 0) {
+      const file = await open(targetPath, "r");
+      try {
+        const result = await file.read(
+          buffer,
+          0,
+          requestedBytes,
+          args.offset,
+        );
+        bytesRead = result.bytesRead;
+      } finally {
+        await file.close();
+      }
+    }
+
+    const nextOffset = args.offset + bytesRead;
+
+    return {
+      ok: true,
+      path: targetPath,
+      offset: args.offset,
+      bytesRead,
+      nextOffset,
+      truncated: nextOffset < size,
+      content: buffer.subarray(0, bytesRead).toString("utf8"),
+      message: `Read file: ${targetPath}`,
     };
   } catch (error) {
     return {
