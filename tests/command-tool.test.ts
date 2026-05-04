@@ -321,7 +321,10 @@ describe("runCommandTool", () => {
 
     try {
       const result = await runCommandTool({
-        command: NODE_FAIL_COMMAND,
+        command:
+          shell === "powershell"
+            ? "Write-Error bad; exit 7"
+            : NODE_FAIL_COMMAND,
         shell,
         cwd: root,
         timeoutMs: 5_000,

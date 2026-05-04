@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { lstat, realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
@@ -271,9 +271,6 @@ function shellInvocation({
   executable?: string;
 }): { executable: string; args: string[] } {
   if (shell === "powershell") {
-    const script = `${command}\nif ($LASTEXITCODE -ne $null) { exit $LASTEXITCODE }`;
-    const encodedCommand = Buffer.from(script, "utf16le").toString("base64");
-
     return {
       executable: executable ?? "powershell.exe",
       args: [
@@ -282,8 +279,8 @@ function shellInvocation({
         "-NonInteractive",
         "-ExecutionPolicy",
         "Bypass",
-        "-EncodedCommand",
-        encodedCommand,
+        "-Command",
+        command,
       ],
     };
   }
@@ -292,31 +289,6 @@ function shellInvocation({
     executable: executable ?? "bash",
     args: ["-lc", command],
   };
-}
-
-function isUnavailableDefaultWindowsBash(args: ResolvedRunCommandArgs): boolean {
-  if (
-    process.platform !== "win32" ||
-    args.shell !== "bash" ||
-    args.executable !== undefined
-  ) {
-    return false;
-  }
-
-  const result = spawnSync("where.exe", ["bash"], {
-    encoding: "utf8",
-    windowsHide: true,
-  });
-  const firstBash = result.stdout
-    .split(/\r?\n/)
-    .find((line) => line.trim().length > 0)
-    ?.trim()
-    .toLowerCase();
-
-  return (
-    firstBash?.endsWith("\\windows\\system32\\bash.exe") === true ||
-    firstBash?.endsWith("\\windowsapps\\bash.exe") === true
-  );
 }
 
 export async function runCommandTool(
@@ -362,17 +334,6 @@ export async function runCommandTool(
         ...partial,
       });
     };
-
-    if (isUnavailableDefaultWindowsBash(args)) {
-      finish({
-        ok: false,
-        exitCode: null,
-        signal: null,
-        timedOut: false,
-        message: "Failed to start command: Windows default Bash is unavailable.",
-      });
-      return;
-    }
 
     const child = spawn(invocation.executable, invocation.args, {
       cwd: args.cwd,
