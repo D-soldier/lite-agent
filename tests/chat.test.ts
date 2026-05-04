@@ -188,6 +188,7 @@ describe("handleUserMessage", () => {
     expect(firstRequest.tools?.map((tool) => tool.function?.name)).toEqual([
       "write_file",
       "read_file",
+      "run_command",
     ]);
   });
 
@@ -391,6 +392,191 @@ describe("handleUserMessage", () => {
         role: "assistant",
         content: "read done",
       });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("confirms run_command, executes it, sends tool result, and streams final response", async () => {
+    const root = mkdtempSync(join(tmpdir(), "lite-agent-chat-"));
+
+    try {
+      const messages: ChatCompletionMessageParam[] = [];
+      const writes: string[] = [];
+      const confirmations: ConfirmationRequest[] = [];
+      const client = createQueuedFakeClient([
+        chatMessage({
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            {
+              id: "call_command_1",
+              type: "function",
+              function: {
+                name: "run_command",
+                arguments: JSON.stringify({
+                  command: "node -e \"process.stdout.write('command ok')\"",
+                  shell: process.platform === "win32" ? "powershell" : "bash",
+                  cwd: ".",
+                  timeoutMs: 5000,
+                }),
+              },
+            },
+          ],
+        }),
+        chatMessage({ role: "assistant", content: "ready to answer" }),
+        streamText("command done"),
+      ]);
+
+      await handleUserMessage({
+        client,
+        model: "test-model",
+        writeRoot: root,
+        messages,
+        userInput: "run a command",
+        write: (text) => {
+          writes.push(text);
+        },
+        askConfirmation: async (request) => {
+          confirmations.push(request);
+          return true;
+        },
+      });
+
+      expect(confirmations).toHaveLength(1);
+      expect(confirmations[0]).toMatchObject({
+        type: "run_command",
+        command: "node -e \"process.stdout.write('command ok')\"",
+        cwd: root,
+        timeoutMs: 5000,
+      });
+
+      const toolMessage = messages.find((message) => message.role === "tool");
+      if (!toolMessage || typeof toolMessage.content !== "string") {
+        throw new Error("Expected run_command tool message");
+      }
+      const payload = JSON.parse(toolMessage.content) as Record<string, unknown>;
+
+      expect(payload).toMatchObject({
+        ok: true,
+        cwd: root,
+        exitCode: 0,
+        timedOut: false,
+        stdout: "command ok",
+      });
+      expect(writes).toEqual(["command done"]);
+      expect(messages.at(-1)).toEqual({
+        role: "assistant",
+        content: "command done",
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not execute run_command when the user rejects confirmation", async () => {
+    const root = mkdtempSync(join(tmpdir(), "lite-agent-chat-"));
+
+    try {
+      const messages: ChatCompletionMessageParam[] = [];
+      const markerPath = join(root, "marker.txt");
+      const client = createQueuedFakeClient([
+        chatMessage({
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            {
+              id: "call_command_1",
+              type: "function",
+              function: {
+                name: "run_command",
+                arguments: JSON.stringify({
+                  command:
+                    "node -e \"require('node:fs').writeFileSync('marker.txt', 'created')\"",
+                  shell: process.platform === "win32" ? "powershell" : "bash",
+                  cwd: ".",
+                }),
+              },
+            },
+          ],
+        }),
+        chatMessage({ role: "assistant", content: "ready to answer" }),
+        streamText("command rejected"),
+      ]);
+
+      await handleUserMessage({
+        client,
+        model: "test-model",
+        writeRoot: root,
+        messages,
+        userInput: "run a command",
+        write: () => undefined,
+        askConfirmation: async () => false,
+      });
+
+      expect(existsSync(markerPath)).toBe(false);
+      expect(messages).toContainEqual(
+        expect.objectContaining({
+          role: "tool",
+          content: expect.stringContaining("用户拒绝执行命令"),
+        }),
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects run_command cwd outside the write root before confirmation", async () => {
+    const root = mkdtempSync(join(tmpdir(), "lite-agent-chat-"));
+
+    try {
+      const messages: ChatCompletionMessageParam[] = [];
+      let confirmationCalls = 0;
+      const client = createQueuedFakeClient([
+        chatMessage({
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            {
+              id: "call_command_1",
+              type: "function",
+              function: {
+                name: "run_command",
+                arguments: JSON.stringify({
+                  command: "node -e \"process.stdout.write('no')\"",
+                  shell: process.platform === "win32" ? "powershell" : "bash",
+                  cwd: "../outside",
+                }),
+              },
+            },
+          ],
+        }),
+        chatMessage({ role: "assistant", content: "ready to answer" }),
+        streamText("command failed"),
+      ]);
+
+      await handleUserMessage({
+        client,
+        model: "test-model",
+        writeRoot: root,
+        messages,
+        userInput: "run outside",
+        write: () => undefined,
+        askConfirmation: async () => {
+          confirmationCalls += 1;
+          return true;
+        },
+      });
+
+      const toolMessage = messages.find((message) => message.role === "tool");
+      if (!toolMessage || typeof toolMessage.content !== "string") {
+        throw new Error("Expected run_command tool message");
+      }
+      const payload = JSON.parse(toolMessage.content) as Record<string, unknown>;
+
+      expect(confirmationCalls).toBe(0);
+      expect(payload.ok).toBe(false);
+      expect(payload.message).toEqual(expect.stringContaining("write root"));
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

@@ -17,12 +17,22 @@ import {
   writeFileTool,
 } from "./file-tool";
 import {
+  RUN_COMMAND_TOOL,
+  parseRunCommandArgs,
+  resolveCommandCwd,
+  runCommandTool,
+} from "./command-tool";
+import {
   createConversationLogger,
   type ConversationLogger,
 } from "./conversation-log";
 
 export const MAX_TOOL_ROUNDS = 2;
-export const AVAILABLE_TOOLS = [WRITE_FILE_TOOL, READ_FILE_TOOL];
+export const AVAILABLE_TOOLS = [
+  WRITE_FILE_TOOL,
+  READ_FILE_TOOL,
+  RUN_COMMAND_TOOL,
+];
 
 export type ChatClient = Pick<OpenAI, "chat">;
 
@@ -44,11 +54,24 @@ export type SendMessageOptions = {
   write?: (text: string) => void;
 };
 
-export type ConfirmationRequest = {
+export type WriteFileConfirmationRequest = {
+  type: "write_file";
   path: string;
   mode: "overwrite" | "append";
   contentLength: number;
 };
+
+export type RunCommandConfirmationRequest = {
+  type: "run_command";
+  shell: "powershell" | "bash";
+  command: string;
+  cwd: string;
+  timeoutMs: number;
+};
+
+export type ConfirmationRequest =
+  | WriteFileConfirmationRequest
+  | RunCommandConfirmationRequest;
 
 export type AskConfirmation = (
   request: ConfirmationRequest,
@@ -121,15 +144,28 @@ export async function askCliConfirmation(
   rl: Interface,
   request: ConfirmationRequest,
 ): Promise<boolean> {
-  stdout.write(
-    [
-      "\n模型请求写入文件：",
-      `路径：${request.path}`,
-      `模式：${request.mode}`,
-      `内容长度：${request.contentLength}`,
-      "确认写入请输入 y。",
-    ].join("\n"),
-  );
+  if (request.type === "run_command") {
+    stdout.write(
+      [
+        "\n模型请求执行命令：",
+        `shell：${request.shell}`,
+        `cwd：${request.cwd}`,
+        `timeoutMs：${request.timeoutMs}`,
+        `command：${request.command}`,
+        "确认执行请输入 y。",
+      ].join("\n"),
+    );
+  } else {
+    stdout.write(
+      [
+        "\n模型请求写入文件：",
+        `路径：${request.path}`,
+        `模式：${request.mode}`,
+        `内容长度：${request.contentLength}`,
+        "确认写入请输入 y。",
+      ].join("\n"),
+    );
+  }
 
   const answer = await rl.question("\nconfirm> ");
 
@@ -197,6 +233,35 @@ async function executeToolCall({
     }
   }
 
+  if (toolCall.function.name === "run_command") {
+    try {
+      const args = parseRunCommandArgs(
+        parseToolArguments(toolCall.function.arguments),
+      );
+      const cwd = await resolveCommandCwd(writeRoot, args.cwd);
+      const confirmed = await askConfirmation({
+        type: "run_command",
+        shell: args.shell,
+        command: args.command,
+        cwd,
+        timeoutMs: args.timeoutMs,
+      });
+
+      if (!confirmed) {
+        return toolResult({ ok: false, message: "用户拒绝执行命令。" });
+      }
+
+      return JSON.stringify(
+        await runCommandTool({
+          ...args,
+          cwd,
+        }),
+      );
+    } catch (error) {
+      return toolResult({ ok: false, message: formatError(error) });
+    }
+  }
+
   if (toolCall.function.name === "write_file") {
     try {
       const args = parseWriteFileArgs(
@@ -204,6 +269,7 @@ async function executeToolCall({
       );
       const targetPath = resolveWritePath(writeRoot, args.path);
       const confirmed = await askConfirmation({
+        type: "write_file",
         path: targetPath,
         mode: args.mode,
         contentLength: args.content.length,
