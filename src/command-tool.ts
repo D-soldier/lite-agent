@@ -1,3 +1,4 @@
+import { spawn, spawnSync } from "node:child_process";
 import { lstat, realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
@@ -17,6 +18,7 @@ export type RunCommandArgs = {
 
 export type ResolvedRunCommandArgs = Omit<RunCommandArgs, "cwd"> & {
   cwd: string;
+  executable?: string;
 };
 
 export type RunCommandResult = {
@@ -233,4 +235,208 @@ export async function resolveCommandCwd(
   }
 
   return cwd;
+}
+
+type OutputCapture = {
+  chunks: Buffer[];
+  bytes: number;
+  truncated: boolean;
+};
+
+function appendLimitedOutput(capture: OutputCapture, chunk: Buffer): void {
+  const remainingBytes = MAX_COMMAND_OUTPUT_BYTES - capture.bytes;
+
+  if (remainingBytes > 0) {
+    const nextChunk = chunk.subarray(0, remainingBytes);
+    capture.chunks.push(nextChunk);
+    capture.bytes += nextChunk.byteLength;
+  }
+
+  if (chunk.byteLength > remainingBytes) {
+    capture.truncated = true;
+  }
+}
+
+function stringifyOutput(capture: OutputCapture): string {
+  return Buffer.concat(capture.chunks, capture.bytes).toString("utf8");
+}
+
+function shellInvocation({
+  command,
+  shell,
+  executable,
+}: {
+  command: string;
+  shell: RunCommandShell;
+  executable?: string;
+}): { executable: string; args: string[] } {
+  if (shell === "powershell") {
+    const script = `${command}\nif ($LASTEXITCODE -ne $null) { exit $LASTEXITCODE }`;
+    const encodedCommand = Buffer.from(script, "utf16le").toString("base64");
+
+    return {
+      executable: executable ?? "powershell.exe",
+      args: [
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-EncodedCommand",
+        encodedCommand,
+      ],
+    };
+  }
+
+  return {
+    executable: executable ?? "bash",
+    args: ["-lc", command],
+  };
+}
+
+function isUnavailableDefaultWindowsBash(args: ResolvedRunCommandArgs): boolean {
+  if (
+    process.platform !== "win32" ||
+    args.shell !== "bash" ||
+    args.executable !== undefined
+  ) {
+    return false;
+  }
+
+  const result = spawnSync("where.exe", ["bash"], {
+    encoding: "utf8",
+    windowsHide: true,
+  });
+  const firstBash = result.stdout
+    .split(/\r?\n/)
+    .find((line) => line.trim().length > 0)
+    ?.trim()
+    .toLowerCase();
+
+  return (
+    firstBash?.endsWith("\\windows\\system32\\bash.exe") === true ||
+    firstBash?.endsWith("\\windowsapps\\bash.exe") === true
+  );
+}
+
+export async function runCommandTool(
+  args: ResolvedRunCommandArgs,
+): Promise<RunCommandResult> {
+  const startedAt = Date.now();
+  const stdoutCapture: OutputCapture = {
+    chunks: [],
+    bytes: 0,
+    truncated: false,
+  };
+  const stderrCapture: OutputCapture = {
+    chunks: [],
+    bytes: 0,
+    truncated: false,
+  };
+  const invocation = shellInvocation(args);
+
+  return await new Promise<RunCommandResult>((resolveResult) => {
+    let timedOut = false;
+    let settled = false;
+
+    const finish = (
+      partial: Pick<
+        RunCommandResult,
+        "ok" | "exitCode" | "signal" | "timedOut" | "message"
+      >,
+    ) => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      resolveResult({
+        shell: args.shell,
+        command: args.command,
+        cwd: args.cwd,
+        stdout: stringifyOutput(stdoutCapture),
+        stderr: stringifyOutput(stderrCapture),
+        stdoutTruncated: stdoutCapture.truncated,
+        stderrTruncated: stderrCapture.truncated,
+        durationMs: Date.now() - startedAt,
+        ...partial,
+      });
+    };
+
+    if (isUnavailableDefaultWindowsBash(args)) {
+      finish({
+        ok: false,
+        exitCode: null,
+        signal: null,
+        timedOut: false,
+        message: "Failed to start command: Windows default Bash is unavailable.",
+      });
+      return;
+    }
+
+    const child = spawn(invocation.executable, invocation.args, {
+      cwd: args.cwd,
+      env: process.env,
+      shell: false,
+      windowsHide: true,
+    });
+
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      child.kill();
+    }, args.timeoutMs);
+
+    child.stdout?.on("data", (chunk: Buffer) => {
+      appendLimitedOutput(stdoutCapture, chunk);
+    });
+
+    child.stderr?.on("data", (chunk: Buffer) => {
+      appendLimitedOutput(stderrCapture, chunk);
+    });
+
+    child.on("error", (error) => {
+      clearTimeout(timeout);
+      finish({
+        ok: false,
+        exitCode: null,
+        signal: null,
+        timedOut,
+        message: `Failed to start command: ${error.message}`,
+      });
+    });
+
+    child.on("close", (exitCode, signal) => {
+      clearTimeout(timeout);
+
+      if (timedOut) {
+        finish({
+          ok: false,
+          exitCode: null,
+          signal,
+          timedOut: true,
+          message: `Command timed out after ${args.timeoutMs} ms.`,
+        });
+        return;
+      }
+
+      if (exitCode === null) {
+        finish({
+          ok: false,
+          exitCode,
+          signal,
+          timedOut: false,
+          message: `Command exited with signal ${signal}.`,
+        });
+        return;
+      }
+
+      finish({
+        ok: exitCode === 0,
+        exitCode,
+        signal,
+        timedOut: false,
+        message: `Command exited with code ${exitCode}.`,
+      });
+    });
+  });
 }

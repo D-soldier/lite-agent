@@ -11,11 +11,44 @@ import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_COMMAND_TIMEOUT_MS,
+  MAX_COMMAND_OUTPUT_BYTES,
   MAX_COMMAND_TIMEOUT_MS,
   RUN_COMMAND_TOOL,
   parseRunCommandArgs,
   resolveCommandCwd,
+  runCommandTool,
+  type RunCommandShell,
 } from "../src/command-tool";
+
+const NODE_STDOUT_COMMAND = 'node -e "process.stdout.write(\'hello\')"';
+const NODE_FAIL_COMMAND =
+  'node -e "process.stderr.write(\'bad\'); process.exit(7)"';
+const NODE_TIMEOUT_COMMAND = 'node -e "setTimeout(()=>{}, 2000)"';
+const NODE_LARGE_OUTPUT_COMMAND =
+  'node -e "process.stdout.write(\'a\'.repeat(70000)); process.stderr.write(\'e\'.repeat(70000))"';
+
+async function canRunShell(shell: RunCommandShell): Promise<boolean> {
+  const result = await runCommandTool({
+    command: NODE_STDOUT_COMMAND,
+    shell,
+    cwd: process.cwd(),
+    timeoutMs: 5_000,
+  });
+
+  return result.ok && result.stdout === "hello";
+}
+
+async function pickAvailableShell(): Promise<RunCommandShell | null> {
+  if (await canRunShell("powershell")) {
+    return "powershell";
+  }
+
+  if (await canRunShell("bash")) {
+    return "bash";
+  }
+
+  return null;
+}
 
 describe("RUN_COMMAND_TOOL", () => {
   it("defines the run_command function schema", () => {
@@ -211,6 +244,170 @@ describe("resolveCommandCwd", () => {
     try {
       await expect(resolveCommandCwd(root, "missing")).rejects.toThrow();
       expect(existsSync(join(root, "missing"))).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("runCommandTool", () => {
+  it("runs a PowerShell command when PowerShell is available", async () => {
+    if (!(await canRunShell("powershell"))) {
+      return;
+    }
+
+    const root = mkdtempSync(join(tmpdir(), "lite-agent-command-"));
+
+    try {
+      const result = await runCommandTool({
+        command: NODE_STDOUT_COMMAND,
+        shell: "powershell",
+        cwd: root,
+        timeoutMs: 5_000,
+      });
+
+      expect(result).toMatchObject({
+        ok: true,
+        shell: "powershell",
+        command: NODE_STDOUT_COMMAND,
+        cwd: root,
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        stdout: "hello",
+        stderr: "",
+        stdoutTruncated: false,
+        stderrTruncated: false,
+      });
+      expect(result.durationMs).toEqual(expect.any(Number));
+      expect(result.message).toBe("Command exited with code 0.");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("runs a Bash command when Bash is available", async () => {
+    if (!(await canRunShell("bash"))) {
+      return;
+    }
+
+    const root = mkdtempSync(join(tmpdir(), "lite-agent-command-"));
+
+    try {
+      const result = await runCommandTool({
+        command: NODE_STDOUT_COMMAND,
+        shell: "bash",
+        cwd: root,
+        timeoutMs: 5_000,
+      });
+
+      expect(result.ok).toBe(true);
+      expect(result.shell).toBe("bash");
+      expect(result.stdout).toBe("hello");
+      expect(result.exitCode).toBe(0);
+      expect(result.timedOut).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("returns ok false for non-zero exit codes", async () => {
+    const shell = await pickAvailableShell();
+    if (!shell) {
+      return;
+    }
+
+    const root = mkdtempSync(join(tmpdir(), "lite-agent-command-"));
+
+    try {
+      const result = await runCommandTool({
+        command: NODE_FAIL_COMMAND,
+        shell,
+        cwd: root,
+        timeoutMs: 5_000,
+      });
+
+      expect(result.ok).toBe(false);
+      expect(result.exitCode).toBe(7);
+      expect(result.timedOut).toBe(false);
+      expect(result.stderr).toContain("bad");
+      expect(result.message).toBe("Command exited with code 7.");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("returns timedOut when the command exceeds timeoutMs", async () => {
+    const shell = await pickAvailableShell();
+    if (!shell) {
+      return;
+    }
+
+    const root = mkdtempSync(join(tmpdir(), "lite-agent-command-"));
+
+    try {
+      const result = await runCommandTool({
+        command: NODE_TIMEOUT_COMMAND,
+        shell,
+        cwd: root,
+        timeoutMs: 100,
+      });
+
+      expect(result.ok).toBe(false);
+      expect(result.exitCode).toBeNull();
+      expect(result.timedOut).toBe(true);
+      expect(result.message).toBe("Command timed out after 100 ms.");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("truncates stdout and stderr after 64KB", async () => {
+    const shell = await pickAvailableShell();
+    if (!shell) {
+      return;
+    }
+
+    const root = mkdtempSync(join(tmpdir(), "lite-agent-command-"));
+
+    try {
+      const result = await runCommandTool({
+        command: NODE_LARGE_OUTPUT_COMMAND,
+        shell,
+        cwd: root,
+        timeoutMs: 5_000,
+      });
+
+      expect(result.ok).toBe(true);
+      expect(Buffer.byteLength(result.stdout ?? "", "utf8")).toBe(
+        MAX_COMMAND_OUTPUT_BYTES,
+      );
+      expect(Buffer.byteLength(result.stderr ?? "", "utf8")).toBe(
+        MAX_COMMAND_OUTPUT_BYTES,
+      );
+      expect(result.stdoutTruncated).toBe(true);
+      expect(result.stderrTruncated).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("returns a structured failure when the shell cannot start", async () => {
+    const root = mkdtempSync(join(tmpdir(), "lite-agent-command-"));
+
+    try {
+      const result = await runCommandTool({
+        command: "echo hello",
+        shell: "bash",
+        cwd: root,
+        timeoutMs: 5_000,
+        executable: "definitely-missing-lite-agent-shell",
+      });
+
+      expect(result.ok).toBe(false);
+      expect(result.exitCode).toBeNull();
+      expect(result.timedOut).toBe(false);
+      expect(result.message).toContain("Failed to start command");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
