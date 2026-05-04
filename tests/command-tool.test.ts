@@ -1,9 +1,20 @@
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_COMMAND_TIMEOUT_MS,
   MAX_COMMAND_TIMEOUT_MS,
   RUN_COMMAND_TOOL,
   parseRunCommandArgs,
+  resolveCommandCwd,
 } from "../src/command-tool";
 
 describe("RUN_COMMAND_TOOL", () => {
@@ -88,5 +99,120 @@ describe("parseRunCommandArgs", () => {
     expect(() =>
       parseRunCommandArgs({ command: "pwd", timeoutMs: 120_001 }),
     ).toThrow("timeoutMs");
+  });
+});
+
+describe("resolveCommandCwd", () => {
+  it("resolves the default cwd to the write root", async () => {
+    const root = mkdtempSync(join(tmpdir(), "lite-agent-command-"));
+
+    try {
+      await expect(resolveCommandCwd(root, ".")).resolves.toBe(resolve(root));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("allows a relative directory inside the write root", async () => {
+    const root = mkdtempSync(join(tmpdir(), "lite-agent-command-"));
+
+    try {
+      mkdirSync(join(root, "packages", "app"), { recursive: true });
+
+      await expect(resolveCommandCwd(root, "packages/app")).resolves.toBe(
+        join(root, "packages", "app"),
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("allows an absolute directory inside the write root", async () => {
+    const root = mkdtempSync(join(tmpdir(), "lite-agent-command-"));
+
+    try {
+      const cwd = join(root, "scripts");
+      mkdirSync(cwd);
+
+      await expect(resolveCommandCwd(root, cwd)).resolves.toBe(cwd);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects cwd outside the write root", async () => {
+    const root = mkdtempSync(join(tmpdir(), "lite-agent-command-"));
+    const outside = mkdtempSync(join(tmpdir(), "lite-agent-outside-"));
+
+    try {
+      await expect(resolveCommandCwd(root, "../outside")).rejects.toThrow(
+        "write root",
+      );
+      await expect(resolveCommandCwd(root, outside)).rejects.toThrow(
+        "write root",
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects missing directories and file paths", async () => {
+    const root = mkdtempSync(join(tmpdir(), "lite-agent-command-"));
+
+    try {
+      writeFileSync(join(root, "file.txt"), "content");
+
+      await expect(resolveCommandCwd(root, "missing")).rejects.toThrow(
+        "exist",
+      );
+      await expect(resolveCommandCwd(root, "file.txt")).rejects.toThrow(
+        "directory",
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a linked cwd that escapes the write root", async () => {
+    const root = mkdtempSync(join(tmpdir(), "lite-agent-command-"));
+    const outside = mkdtempSync(join(tmpdir(), "lite-agent-outside-"));
+
+    try {
+      const linkPath = join(root, "link");
+
+      try {
+        symlinkSync(
+          outside,
+          linkPath,
+          process.platform === "win32" ? "junction" : "dir",
+        );
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          "code" in error &&
+          (error.code === "EPERM" || error.code === "EACCES")
+        ) {
+          return;
+        }
+        throw error;
+      }
+
+      await expect(resolveCommandCwd(root, "link")).rejects.toThrow("linked");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("does not create directories while resolving cwd", async () => {
+    const root = mkdtempSync(join(tmpdir(), "lite-agent-command-"));
+
+    try {
+      await expect(resolveCommandCwd(root, "missing")).rejects.toThrow();
+      expect(existsSync(join(root, "missing"))).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

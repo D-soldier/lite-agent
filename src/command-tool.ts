@@ -1,3 +1,5 @@
+import { lstat, realpath } from "node:fs/promises";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
 
 export const DEFAULT_COMMAND_TIMEOUT_MS = 30_000;
@@ -119,4 +121,116 @@ export function parseRunCommandArgs(
     cwd,
     timeoutMs,
   };
+}
+
+function isPathInside(root: string, target: string): boolean {
+  const relativePath = relative(root, target);
+
+  return (
+    relativePath === "" ||
+    (relativePath !== ".." &&
+      !relativePath.startsWith("../") &&
+      !relativePath.startsWith("..\\") &&
+      !isAbsolute(relativePath))
+  );
+}
+
+async function rejectLinkedCwdSegments(
+  root: string,
+  cwd: string,
+): Promise<void> {
+  const relativeDirectory = relative(root, cwd);
+  if (relativeDirectory === "") {
+    return;
+  }
+
+  let current = root;
+  for (const segment of relativeDirectory.split(sep)) {
+    current = resolve(current, segment);
+
+    const stats = await lstat(current);
+    if (stats.isSymbolicLink()) {
+      throw new Error(`Command cwd includes a linked directory: ${current}`);
+    }
+  }
+}
+
+export async function resolveCommandCwd(
+  writeRoot: string,
+  requestedCwd = ".",
+): Promise<string> {
+  const root = resolve(writeRoot);
+  const cwd = isAbsolute(requestedCwd)
+    ? resolve(requestedCwd)
+    : resolve(root, requestedCwd);
+
+  if (!isPathInside(root, cwd)) {
+    throw new Error(`Command cwd is outside the write root: ${root}`);
+  }
+
+  let rootStats;
+  try {
+    rootStats = await lstat(root);
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      "code" in error &&
+      error.code === "ENOENT"
+    ) {
+      throw new Error(`Command write root does not exist: ${root}`);
+    }
+    throw error;
+  }
+
+  if (rootStats.isSymbolicLink()) {
+    throw new Error(`Command write root is a linked directory: ${root}`);
+  }
+
+  if (!rootStats.isDirectory()) {
+    throw new Error(`Command write root is not a directory: ${root}`);
+  }
+
+  const realRoot = await realpath(root);
+
+  try {
+    await rejectLinkedCwdSegments(root, cwd);
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      "code" in error &&
+      error.code === "ENOENT"
+    ) {
+      throw new Error(`Command cwd does not exist: ${cwd}`);
+    }
+    throw error;
+  }
+
+  let cwdStats;
+  try {
+    cwdStats = await lstat(cwd);
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      "code" in error &&
+      error.code === "ENOENT"
+    ) {
+      throw new Error(`Command cwd does not exist: ${cwd}`);
+    }
+    throw error;
+  }
+
+  if (cwdStats.isSymbolicLink()) {
+    throw new Error(`Command cwd is a linked directory: ${cwd}`);
+  }
+
+  if (!cwdStats.isDirectory()) {
+    throw new Error(`Command cwd is not a directory: ${cwd}`);
+  }
+
+  const realCwd = await realpath(cwd);
+  if (!isPathInside(realRoot, realCwd)) {
+    throw new Error(`Command cwd resolves outside the write root: ${realRoot}`);
+  }
+
+  return cwd;
 }
